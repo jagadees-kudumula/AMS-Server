@@ -9,6 +9,7 @@ __pycache__/
 *.pyo
 *.pyd
 .env
+app/__pycache__
 
 # IDE / Editor stuff
 .vscode/
