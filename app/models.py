@@ -65,5 +65,6 @@ class DefaultSchedule(db.Model):
 
 class CR(db.Model):
     student_id = db.Column(db.String(20), db.ForeignKey('student.id'), primary_key=True)
+    mobile = db.Column(db.String(15), nullable=False)
 
     student = db.relationship('Student', backref='CR')
