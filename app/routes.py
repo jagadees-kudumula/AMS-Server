@@ -556,35 +556,7 @@ def upload_default_schedules():
         return jsonify({'message': str(e)}), 500
 
 
-# Faculty Schedule Endpoint
-@routes.route('/faculty/<userEmail>', methods=['GET'])
-def fetch_faculty_ids():
-    facultyEmail = request.view_args['userEmail']
-    facultyName = facultyEmail.split('@')[0]  # Extract the part before '@'
-    try:
-        faculty = Faculty.query.filter(Faculty.email == facultyEmail).first()
-        if not faculty:
-            return jsonify({'success': False, 'error': 'Faculty not found'}), 404
-
-        faculty_ids = [{'id': faculty.id, 'name': faculty.name}]
-        return jsonify({'success': True, 'faculties': faculty_ids}), 200
-    except Exception as e:
-        print(f"Error fetching faculty by email: {str(e)}")
-        return jsonify({'success': False, 'error': 'Failed to fetch faculty'}), 500
-
-@routes.route('/fetchfacultyids/<facultyName>', methods=['GET'])
-def fetch_faculty_id():
-    facultyName = request.view_args['facultyName']
-    try:
-        faculties = Faculty.query.filter(Faculty.name.ilike(f'%{facultyName}%')).all()
-        faculty_list = [{'id': faculty.id, 'name': faculty.name} for faculty in faculties]
-        
-        return jsonify({'success': True, 'faculties': faculty_list}), 200
-    except Exception as e:
-        print(f"Error fetching faculty IDs: {str(e)}")
-        return jsonify({'success': False, 'error': 'Failed to fetch faculty IDs'}), 500
-    
-    
+# Faculty Schedule Endpoint    
 @routes.route('/faculty/<faculty_id>/schedule', methods=['GET'])
 def get_faculty_schedule(faculty_id):
     try:
