@@ -66,6 +66,7 @@ class DefaultSchedule(db.Model):
     day_of_week = db.Column(db.String(10), nullable=False)  # e.g., 'Monday'
     start_time = db.Column(db.String(5), nullable=False)
     end_time = db.Column(db.String(5), nullable=False)
+    venue = db.Column(db.String(25), nullable=False)
 
 class CR(db.Model):
     student_id = db.Column(db.String(20), db.ForeignKey('student.id', ondelete='CASCADE'), primary_key=True)

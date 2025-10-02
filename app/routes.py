@@ -500,6 +500,7 @@ def upload_default_schedules():
             period = row['Period']
             subject_code = row['SubjectCode']
             faculty_id = row['FacultyId']
+            venue = row['Venue']
 
             subject_type = db.session.query(Subject.subject_type).filter(Subject.subject_code == subject_code).scalar()
 
@@ -524,7 +525,8 @@ def upload_default_schedules():
                 day_of_week = day_of_week,
                 start_time = start_time,
                 end_time = end_time,
-                assignment_id = assignment_id
+                assignment_id = assignment_id,
+                venue = venue
             )
 
             db.session.add(defaultSchedule)
@@ -533,5 +535,4 @@ def upload_default_schedules():
         return jsonify({'message': 'Default schedules uploaded successfully'}), 201
     except Exception as e:
         db.session.rollback()
-        print(str(e))
         return jsonify({'message': str(e)}), 500
