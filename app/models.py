@@ -46,6 +46,7 @@ class Schedule(db.Model):
     end_time = db.Column(db.String(5), nullable=False)
     status = db.Column(db.Boolean, default=False)
     venue = db.Column(db.String(50))
+    otp=db.Column(db.String(6) ,nullable=True)
 
     assignment = db.relationship('FacultyAssignment', backref='schedules')
 

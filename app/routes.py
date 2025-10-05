@@ -1,4 +1,4 @@
-from flask import Flask, request, jsonify, Blueprint
+from flask import Flask, request, jsonify, Blueprint,current_app
 from app import db
 from app.models import CR, Student, Faculty, FacultyAssignment, Subject, DefaultSchedule, Schedule, AttendanceRecord
 import pandas as pd
@@ -8,6 +8,8 @@ from datetime import datetime, date, timedelta
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 import atexit
+
+from threading import Timer
 
 routes = Blueprint('main', __name__)
 batchToYear = {'E1':1,'E2':2,'E3':3,'E4':4}
@@ -606,6 +608,34 @@ def get_faculty_schedule(faculty_id):
     except Exception as e:
         print(f"Error fetching faculty schedule: {str(e)}")
         return jsonify({'success': False, 'error': 'Failed to fetch schedule'}), 500
+    
+#Subjects of facultyId   
+@routes.route('/faculty/<faculty_id>/subjects', methods=['GET'])
+def get_faculty_subjects(faculty_id):
+    try:
+        # Get all subjects assigned to this faculty
+        subjects = db.session.query(Subject)\
+            .join(FacultyAssignment, Subject.subject_code == FacultyAssignment.subject_code)\
+            .filter(FacultyAssignment.faculty_id == faculty_id)\
+            .distinct()\
+            .all()
+        
+        subject_list = []
+        for subject in subjects:
+            subject_list.append({
+                'subject_code': subject.subject_code,
+                'subject_name': subject.subject_name,
+                'subject_type': subject.subject_type
+            })
+        
+        return jsonify({
+            'success': True,
+            'subjects': subject_list
+        }), 200
+        
+    except Exception as e:
+        print(f"Error fetching faculty subjects: {str(e)}")
+        return jsonify({'success': False, 'error': 'Failed to fetch subjects'}), 500
 
 # Available Time Slots Endpoint
 @routes.route('/faculty/<faculty_id>/available-slots', methods=['GET'])
@@ -615,22 +645,27 @@ def get_available_slots(faculty_id):
         batch = request.args.get('year')  # This is actually batch (E1, E2, etc.)
         department = request.args.get('department')
         section = request.args.get('section')
-        
-        if not all([date_str, batch, department, section]):
+        subject_type = request.args.get('subject_type')  # Now subject_type is provided
+
+        if not all([date_str, batch, department, section, subject_type]):
             return jsonify({'success': False, 'error': 'Missing parameters'}), 400
-        
+
         target_date = datetime.strptime(date_str, '%Y-%m-%d').date()
         year = batchToYear.get(batch)  # Convert batch to year number
-        
+
         if not year:
             return jsonify({'success': False, 'error': 'Invalid batch format'}), 400
 
-        # Define all possible time slots
+        subject_type = subject_type.lower()
+
+        # Define all possible time slots (skip 12:30 to 13:30)
         all_slots = [
             ('08:30', '09:30'), ('09:30', '10:30'), ('10:30', '11:30'),
             ('11:30', '12:30'), ('13:40', '14:40'), ('14:40', '15:40'),
             ('15:40', '16:40')
         ]
+
+        available_slots = []
 
         # Get all schedules for this group on the given date
         existing_schedules = db.session.query(Schedule)\
@@ -644,22 +679,40 @@ def get_available_slots(faculty_id):
 
         print(f"Found {len(existing_schedules)} existing schedules for conflict checking")
 
-        # Filter out slots that have a class assigned
-        available_slots = []
-        for slot_start, slot_end in all_slots:
-            conflict = False
-            for existing in existing_schedules:
-                # Check if time slots overlap
-                if not (slot_end <= existing.start_time or slot_start >= existing.end_time):
-                    conflict = True
-                    print(f"Conflict found: {slot_start}-{slot_end} vs {existing.start_time}-{existing.end_time}")
-                    break
-            
-            if not conflict:
-                available_slots.append({
-                    'start_time': slot_start,
-                    'end_time': slot_end
-                })
+        if subject_type == "lab":
+            # Lab: 3-hour slots (consecutive periods)
+            for i in range(len(all_slots) - 2):
+                slot_start = all_slots[i][0]
+                slot_end = all_slots[i + 2][1]
+                # Skip slots that would include 12:30 to 13:30
+                if slot_start < '12:30' < slot_end:
+                    continue
+                conflict = False
+                for existing in existing_schedules:
+                    # Check if time slots overlap
+                    if not (slot_end <= existing.start_time or slot_start >= existing.end_time):
+                        conflict = True
+                        print(f"Conflict found: {slot_start}-{slot_end} vs {existing.start_time}-{existing.end_time}")
+                        break
+                if not conflict:
+                    available_slots.append({
+                        'start_time': slot_start,
+                        'end_time': slot_end
+                    })
+        else:
+            # Normal: 1-hour slots
+            for slot_start, slot_end in all_slots:
+                conflict = False
+                for existing in existing_schedules:
+                    if not (slot_end <= existing.start_time or slot_start >= existing.end_time):
+                        conflict = True
+                        print(f"Conflict found: {slot_start}-{slot_end} vs {existing.start_time}-{existing.end_time}")
+                        break
+                if not conflict:
+                    available_slots.append({
+                        'start_time': slot_start,
+                        'end_time': slot_end
+                    })
 
         print(f"Available slots: {available_slots}")
 
@@ -1044,14 +1097,7 @@ def start_daily_scheduler(app):
         id='daily_schedule_move',
         name='Move tomorrow schedules daily at 5:58 PM'
     )
-    scheduler.add_job(
-        func=cleanup_old_schedules,
-        args=[app],
-        trigger=CronTrigger(hour=17, minute=0),
-        id='monthly_schedule_cleanup',
-        name='Cleanup old schedules daily at 5:00 PM'
-    )
-    
+   
     # Start the scheduler
     scheduler.start()
     print("✅ Daily scheduler started - will run at 17:58 every day")
@@ -1070,7 +1116,7 @@ def move_tomorrow_schedules_auto(app):
         try:
             
             # Use TOMORROW's date instead of today
-            target_date = date.today() + timedelta(days=1)
+            target_date = date.today()  + timedelta(days=1)
             day_name = target_date.strftime('%a').upper()
             
             print(f"🤖 AUTO: Moving schedules for TOMORROW - {day_name} ({target_date})")
@@ -1113,6 +1159,85 @@ def move_tomorrow_schedules_auto(app):
         except Exception as e:
             db.session.rollback()
             print(f"❌ AUTO: Error moving schedules: {str(e)}")
+
+@routes.route('/time', methods=['GET'])
+def get_server_time():
+    try:
+        now = datetime.now()
+        current_time = now.strftime('%H:%M:%S')
+        current_date = now.strftime('%Y-%m-%d')
+        # Optionally, include timezone info if needed
+        return jsonify({
+            'success': True,
+            'datetime': f"{current_date}T{current_time}",
+            'date': current_date,
+            'time': current_time,
+            'timezone': 'Asia/Kolkata'
+        }), 200
+    except Exception as e:
+        print(f"Error fetching server time: {str(e)}")
+        return jsonify({'success': False, 'error': 'Failed to fetch server time'}), 500
+    
+@routes.route('/generate-otp', methods=['POST'])
+def generate_otp():
+    data = request.get_json()
+    schedule_id = data.get('schedule_id')
+    faculty_id = data.get('faculty_id')
+    otp = data.get('otp')
+
+    if not all([schedule_id, faculty_id, otp]):
+        return jsonify({'success': False, 'message': 'Missing parameters'}), 400
+
+    schedule = Schedule.query.get(schedule_id)
+    if not schedule:
+        return jsonify({'success': False, 'message': 'Schedule not found'}), 404
+
+    assignment = FacultyAssignment.query.get(schedule.assignment_id)
+    if not assignment or assignment.faculty_id != faculty_id:
+        return jsonify({'success': False, 'message': 'Faculty not authorized for this schedule'}), 403
+
+    # Store OTP and mark attendance as completed
+    schedule.otp = otp
+    schedule.status = True
+    db.session.commit()
+
+    # Schedule OTP removal after 45 seconds
+    run_date = datetime.now() + timedelta(seconds=45)
+    scheduler.add_job(
+        func=remove_otp_job,
+        trigger='date',
+        run_date=run_date,
+        args=[schedule_id],
+        id=f'remove_otp_{schedule_id}',
+        name=f'Remove OTP for schedule {schedule_id}'
+    )
+
+    print(f"⏰ OTP removal scheduled for schedule {schedule_id} at {run_date}")
+    return jsonify({'success': True, 'otp': otp, 'schedule_id': schedule_id}), 200
+
+def remove_otp_job(schedule_id):
+    """Background job to remove OTP after 45 seconds"""
+    try:
+        # Import inside function to avoid circular imports
+        from app import create_app,db
+        from app.models import Schedule
+        
+        # Create app instance and context
+        app = create_app()
+        
+        with app.app_context():
+            schedule = Schedule.query.get(schedule_id)
+            if schedule:
+                schedule.otp = ""
+                db.session.commit()
+                print(f"✅ OTP cleared for schedule {schedule_id}")
+            else:
+                print(f"❌ Schedule {schedule_id} not found during OTP removal")
+                
+    except Exception as e:
+        print(f"❌ Error removing OTP for schedule {schedule_id}: {str(e)}")
+
+
 
 #To clean the schedules automatically for every 100 days at 5:00PM
 def cleanup_old_schedules(app):
