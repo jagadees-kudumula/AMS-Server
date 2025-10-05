@@ -1,6 +1,6 @@
 from flask import Flask, request, jsonify, Blueprint
 from app import db
-from app.models import CR, Student, Faculty, FacultyAssignment, Subject, DefaultSchedule,Schedule
+from app.models import CR, Student, Faculty, FacultyAssignment, Subject, DefaultSchedule, Schedule, AttendanceRecord
 import pandas as pd
 import io
 import json
@@ -11,6 +11,7 @@ import atexit
 
 routes = Blueprint('main', __name__)
 batchToYear = {'E1':1,'E2':2,'E3':3,'E4':4}
+yearToBatch = {1:'E1', 2:'E2', 3:'E3', 4:'E4'}
 
 @routes.route('/students/upload', methods=['POST'])
 def upload_students():
@@ -797,6 +798,233 @@ def delete_schedule(schedule_id):
         return jsonify({'success': False, 'error': str(e)}), 500
 
 
+@routes.route('/faculty/dashboard/<faculty_id>', methods=['GET'])
+def get_faculty_dashboard(faculty_id):
+    try:
+        # Verify faculty exists
+        print(faculty_id)
+        faculty = Faculty.query.get(faculty_id)
+        if not faculty:
+            print("B")
+            return jsonify({
+                'success': False,
+                'message': 'Faculty not found'
+            }), 404
+
+        # Get all assignments for this faculty
+        assignments = FacultyAssignment.query.filter_by(faculty_id=faculty_id).all()
+        
+        if not assignments:
+            return jsonify({
+                'success': True,
+                'message': 'No classes assigned',
+                'classes': [],
+                'stats': {
+                    'totalClasses': 0,
+                    'totalSessions': 0,
+                    'avgAttendance': 0,
+                    'overallAvg': 0
+                }
+            })
+
+        classes_data = []
+        total_sessions = 0
+        total_attendance_percentage = 0
+        valid_classes_count = 0
+
+        for assignment in assignments:
+            # Get subject details
+            subject = assignment.subject
+            
+            # Get all schedules for this assignment
+            schedules = Schedule.query.filter_by(assignment_id=assignment.id).all()
+            total_classes = len(schedules)
+            total_sessions += total_classes
+
+            if total_classes == 0:
+                # If no classes conducted yet, skip or set default values
+                attendance_percentage = 0
+                last_class_date = None
+            else:
+                # Calculate attendance statistics
+                total_attendance_records = 0
+                total_possible_attendance = 0
+                last_class_date = None
+
+                for schedule in schedules:
+                    # Get attendance records for this session
+                    attendance_records = AttendanceRecord.query.filter_by(session_id=schedule.id).all()
+                    
+                    # Count present students
+                    present_count = sum(1 for record in attendance_records if record.status == True)
+                    total_attendance_records += present_count
+                    total_possible_attendance += len(attendance_records)
+                    
+                    # Track last class date
+                    if not last_class_date or schedule.date > last_class_date:
+                        last_class_date = schedule.date
+
+                # Calculate attendance percentage
+                if total_possible_attendance > 0:
+                    attendance_percentage = round((total_attendance_records / total_possible_attendance) * 100, 2)
+                else:
+                    attendance_percentage = 0
+
+                total_attendance_percentage += attendance_percentage
+                valid_classes_count += 1
+
+            # Format last class date
+            if last_class_date:
+                last_class_str = last_class_date.strftime('%d/%m/%Y')
+            else:
+                last_class_str = 'No classes yet'
+
+            class_data = {
+                'id': str(assignment.id),
+                'subjectCode': subject.subject_code,
+                'subjectName': subject.subject_name,
+                'section': assignment.section,
+                'totalClasses': total_classes,
+                'attendancePercentage': attendance_percentage,
+                'lastClass': last_class_str,
+                'department': assignment.department,
+                'year': f"E{assignment.year}" if assignment.year else 'Unknown',
+                'faculty': faculty.name
+            }
+            
+            classes_data.append(class_data)
+
+        # Calculate overall statistics
+        total_classes_count = len(assignments)
+        avg_attendance = round(total_attendance_percentage / valid_classes_count, 2) if valid_classes_count > 0 else 0
+        overall_avg = avg_attendance  # You can modify this if you want different calculation
+
+        response_data = {
+            'success': True,
+            'faculty': {
+                'id': faculty.id,
+                'name': faculty.name,
+                'email': faculty.email
+            },
+            'classes': classes_data,
+            'stats': {
+                'totalClasses': total_classes_count,
+                'totalSessions': total_sessions,
+                'avgAttendance': avg_attendance,
+                'overallAvg': overall_avg
+            }
+        }
+
+        return jsonify(response_data)
+
+    except Exception as e:
+        print(f"Error in get_faculty_dashboard: {str(e)}")
+        return jsonify({
+            'success': False,
+            'message': 'Internal server error',
+            'error': str(e)
+        }), 500
+    
+@routes.route('/class-attendance/<int:assignment_id>', methods=['GET'])
+def get_class_attendance(assignment_id):
+    try:
+        # Get all schedules for this assignment
+        schedules = Schedule.query.filter_by(assignment_id=assignment_id).all()
+        
+        attendance_data = {}
+        
+        for schedule in schedules:
+            date_str = schedule.date.strftime('%d/%m/%Y')
+            
+            # Get attendance records for this session
+            attendance_records = AttendanceRecord.query.filter_by(session_id=schedule.id).all()
+            
+            # Get student details
+            students = []
+            present_count = 0
+            absent_count = 0
+            
+            for record in attendance_records:
+                student = Student.query.get(record.student_id)
+                if student:
+                    students.append({
+                        'student_id': student.id,
+                        'student_name': student.name,
+                        'status': record.status
+                    })
+                    
+                    if record.status:
+                        present_count += 1
+                    else:
+                        absent_count += 1
+            
+            session_data = {
+                'session_id': schedule.id,
+                'date': date_str,
+                'start_time': schedule.start_time,
+                'end_time': schedule.end_time,
+                'topic': 'SELAB',
+                'venue': schedule.venue or '',
+                'status': schedule.status,
+                'present_count': present_count,
+                'absent_count': absent_count,
+                'total_students': len(students),
+                'students': students
+            }
+            
+            if date_str not in attendance_data:
+                attendance_data[date_str] = []
+            
+            attendance_data[date_str].append(session_data)
+        
+        return jsonify({
+            'success': True,
+            'attendanceData': attendance_data
+        })
+        
+    except Exception as e:
+        print(f"Error in get_class_attendance: {str(e)}")
+        return jsonify({
+            'success': False,
+            'message': 'Internal server error'
+        }), 500
+
+@routes.route('/api/faculty/update-attendance', methods=['POST'])
+def update_attendance():
+    try:
+        data = request.get_json()
+        session_id = data.get('session_id')
+        student_id = data.get('student_id')
+        status = data.get('status')
+        
+        # Find the attendance record
+        attendance_record = AttendanceRecord.query.filter_by(
+            session_id=session_id, 
+            student_id=student_id
+        ).first()
+        
+        if attendance_record:
+            attendance_record.status = status
+            db.session.commit()
+            
+            return jsonify({
+                'success': True,
+                'message': 'Attendance updated successfully'
+            })
+        else:
+            return jsonify({
+                'success': False,
+                'message': 'Attendance record not found'
+            }), 404
+            
+    except Exception as e:
+        db.session.rollback()
+        print(f"Error in update_attendance: {str(e)}")
+        return jsonify({
+            'success': False,
+            'message': 'Internal server error'
+        }), 500
+
 
 #Automation of Moving Schedules Daily at 17:58
 scheduler = None
@@ -902,3 +1130,4 @@ def cleanup_old_schedules(app):
         except Exception as e:
             db.session.rollback()
             print(f"❌ CLEANUP: Error deleting old schedules: {str(e)}")
+    
