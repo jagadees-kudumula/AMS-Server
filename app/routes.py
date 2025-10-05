@@ -978,51 +978,69 @@ def get_faculty_dashboard(faculty_id):
             'error': str(e)
         }), 500
     
-@routes.route('/class-attendance/<int:assignment_id>', methods=['GET'])
+@routes.route('/faculty/class-attendance/<int:assignment_id>', methods=['GET'])
 def get_class_attendance(assignment_id):
     try:
-        # Get all schedules for this assignment
-        schedules = Schedule.query.filter_by(assignment_id=assignment_id).all()
+        # Get pagination parameters
+        page = request.args.get('page', 1, type=int)
+        limit = request.args.get('limit', 10, type=int)  # 10 sessions per request
+        include_students = request.args.get('include_students', 'false').lower() == 'true'
+        
+        # Calculate offset
+        offset = (page - 1) * limit
+        
+        # Get total count
+        total_sessions = Schedule.query.filter_by(assignment_id=assignment_id).count()
+        
+        # Single optimized query with joins
+        sessions = db.session.query(
+            Schedule,
+            db.func.count(AttendanceRecord.id).filter(AttendanceRecord.status == True).label('present_count'),
+            db.func.count(AttendanceRecord.id).label('total_records')
+        ).outerjoin(
+            AttendanceRecord, Schedule.id == AttendanceRecord.session_id
+        ).filter(
+            Schedule.assignment_id == assignment_id
+        ).group_by(
+            Schedule.id
+        ).order_by(
+            Schedule.date.desc()
+        ).offset(offset).limit(limit).all()
         
         attendance_data = {}
         
-        for schedule in schedules:
+        for schedule, present_count, total_records in sessions:
             date_str = schedule.date.strftime('%d/%m/%Y')
             
-            # Get attendance records for this session
-            attendance_records = AttendanceRecord.query.filter_by(session_id=schedule.id).all()
-            
-            # Get student details
+            # Only fetch student details if explicitly requested
             students = []
-            present_count = 0
-            absent_count = 0
-            
-            for record in attendance_records:
-                student = Student.query.get(record.student_id)
-                if student:
-                    students.append({
-                        'student_id': student.id,
-                        'student_name': student.name,
-                        'status': record.status
-                    })
-                    
-                    if record.status:
-                        present_count += 1
-                    else:
-                        absent_count += 1
+            if include_students:
+                student_records = db.session.query(
+                    Student.id, Student.name, AttendanceRecord.status
+                ).join(
+                    AttendanceRecord, Student.id == AttendanceRecord.student_id
+                ).filter(
+                    AttendanceRecord.session_id == schedule.id
+                ).all()
+                
+                students = [{
+                    'student_id': student_id,
+                    'student_name': student_name,
+                    'status': status
+                } for student_id, student_name, status in student_records]
             
             session_data = {
                 'session_id': schedule.id,
                 'date': date_str,
                 'start_time': schedule.start_time,
                 'end_time': schedule.end_time,
-                'topic': 'SELAB',
+                'topic': schedule.topic_discussed or '',
                 'venue': schedule.venue or '',
                 'status': schedule.status,
-                'present_count': present_count,
-                'absent_count': absent_count,
-                'total_students': len(students),
-                'students': students
+                'present_count': present_count or 0,
+                'absent_count': (total_records or 0) - (present_count or 0),
+                'total_students': total_records or 0,
+                'students': students  # Empty array if not requested
             }
             
             if date_str not in attendance_data:
@@ -1032,7 +1050,13 @@ def get_class_attendance(assignment_id):
         
         return jsonify({
             'success': True,
-            'attendanceData': attendance_data
+            'attendanceData': attendance_data,
+            'pagination': {
+                'page': page,
+                'limit': limit,
+                'total_sessions': total_sessions,
+                'has_more': (offset + limit) < total_sessions
+            }
         })
         
     except Exception as e:
@@ -1042,7 +1066,35 @@ def get_class_attendance(assignment_id):
             'message': 'Internal server error'
         }), 500
 
-@routes.route('/api/faculty/update-attendance', methods=['POST'])
+@routes.route('/attendance/session/<int:session_id>/students', methods=['GET'])
+def get_session_students(session_id):
+    try:
+        students = db.session.query(
+            Student.id, Student.name, AttendanceRecord.status
+        ).join(
+            AttendanceRecord, Student.id == AttendanceRecord.student_id
+        ).filter(
+            AttendanceRecord.session_id == session_id
+        ).all()
+        
+        student_data = [{
+            'student_id': student_id,
+            'student_name': student_name,
+            'status': status
+        } for student_id, student_name, status in students]
+        
+        return jsonify({
+            'success': True,
+            'students': student_data
+        })
+        
+    except Exception as e:
+        return jsonify({
+            'success': False,
+            'message': 'Internal server error'
+        }), 500
+
+@routes.route('/faculty/update-attendance', methods=['POST'])
 def update_attendance():
     try:
         data = request.get_json()
@@ -1078,6 +1130,137 @@ def update_attendance():
             'message': 'Internal server error'
         }), 500
 
+@routes.route('/faculty/attendance-report/<int:assignment_id>', methods=['GET'])
+def get_attendance_report(assignment_id):
+    try:
+        # Get total sessions count
+        total_sessions = Schedule.query.filter_by(assignment_id=assignment_id).count()
+        
+        if total_sessions == 0:
+            return jsonify({
+                'success': True,
+                'reportData': {
+                    'class_summary': {
+                        'total_sessions': 0,
+                        'total_present': 0,
+                        'total_absent': 0,
+                        'overall_percentage': 0,
+                        'trend': 'stable',
+                        'avg_students_present': 0,
+                        'avg_students_absent': 0
+                    },
+                    'students': []
+                }
+            })
+
+        # Get all sessions for this assignment
+        sessions = Schedule.query.filter_by(assignment_id=assignment_id).all()
+        session_ids = [session.id for session in sessions]
+
+        # Calculate average students present and absent per session
+        attendance_by_session = db.session.query(
+            Schedule.id,
+            db.func.count(db.case((AttendanceRecord.status == True, 1))).label('present_count'),
+            db.func.count(db.case((AttendanceRecord.status == False, 1))).label('absent_count')
+        ).outerjoin(
+            AttendanceRecord, Schedule.id == AttendanceRecord.session_id
+        ).filter(
+            Schedule.id.in_(session_ids)
+        ).group_by(
+            Schedule.id
+        ).all()
+
+        total_present_all_sessions = 0
+        total_absent_all_sessions = 0
+        valid_sessions_count = 0
+
+        for session in attendance_by_session:
+            total_present_all_sessions += session.present_count or 0
+            total_absent_all_sessions += session.absent_count or 0
+            valid_sessions_count += 1
+
+        # Calculate averages
+        avg_students_present = round(total_present_all_sessions / valid_sessions_count, 2) if valid_sessions_count > 0 else 0
+        avg_students_absent = round(total_absent_all_sessions / valid_sessions_count, 2) if valid_sessions_count > 0 else 0
+
+        # Calculate overall statistics (total counts across all sessions)
+        total_present = db.session.query(db.func.count(AttendanceRecord.id))\
+            .join(Schedule)\
+            .filter(
+                Schedule.assignment_id == assignment_id,
+                AttendanceRecord.status == True
+            ).scalar() or 0
+
+        total_absent = db.session.query(db.func.count(AttendanceRecord.id))\
+            .join(Schedule)\
+            .filter(
+                Schedule.assignment_id == assignment_id,
+                AttendanceRecord.status == False
+            ).scalar() or 0
+
+        overall_percentage = round((total_present / (total_present + total_absent)) * 100, 2) if (total_present + total_absent) > 0 else 0
+
+        # Get student-wise attendance
+        students_attendance = db.session.query(
+            Student.id,
+            Student.name,
+            db.func.sum(db.case((AttendanceRecord.status == True, 1), else_=0)).label('present_count'),
+            db.func.sum(db.case((AttendanceRecord.status == False, 1), else_=0)).label('absent_count')
+        ).join(
+            AttendanceRecord, Student.id == AttendanceRecord.student_id
+        ).join(
+            Schedule, AttendanceRecord.session_id == Schedule.id
+        ).filter(
+            Schedule.assignment_id == assignment_id
+        ).group_by(
+            Student.id, Student.name
+        ).all()
+
+        students = []
+        for student_id, student_name, present_count, absent_count in students_attendance:
+            total_student_sessions = present_count + absent_count
+            attendance_percentage = round((present_count / total_student_sessions) * 100, 2) if total_student_sessions > 0 else 0
+            
+            students.append({
+                'student_id': student_id,
+                'student_name': student_name,
+                'present_count': present_count,
+                'absent_count': absent_count,
+                'total_sessions': total_student_sessions,
+                'attendance_percentage': attendance_percentage
+            })
+
+        # Determine trend (simplified - you can implement more sophisticated logic)
+        trend = 'stable'
+        if overall_percentage > 75:
+            trend = 'improving'
+        elif overall_percentage < 60:
+            trend = 'declining'
+
+        report_data = {
+            'class_summary': {
+                'total_sessions': total_sessions,
+                'total_present': total_present,
+                'total_absent': total_absent,
+                'overall_percentage': overall_percentage,
+                'trend': trend,
+                'avg_students_present': avg_students_present,
+                'avg_students_absent': avg_students_absent
+            },
+            'students': students
+        }
+
+        return jsonify({
+            'success': True,
+            'reportData': report_data
+        })
+
+    except Exception as e:
+        print(f"Error in get_attendance_report: {str(e)}")
+        return jsonify({
+            'success': False,
+            'message': 'Internal server error'
+        }), 500
 
 #Automation of Moving Schedules Daily at 17:58
 scheduler = None

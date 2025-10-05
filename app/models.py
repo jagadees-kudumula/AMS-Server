@@ -7,6 +7,7 @@ class Student(db.Model):
     year = db.Column(db.Integer, nullable=False, index=True)
     department = db.Column(db.String(50), nullable=False, index=True)
     section = db.Column(db.String(10), nullable=False, index=True)
+    binding_id = db.Column(db.String(200))
 
 
 class Faculty(db.Model):
@@ -47,6 +48,7 @@ class Schedule(db.Model):
     status = db.Column(db.Boolean, default=False)
     venue = db.Column(db.String(50))
     otp=db.Column(db.String(6) ,nullable=True)
+    topic_discussed = db.Column(db.String(100))
 
     assignment = db.relationship('FacultyAssignment', backref='schedules')
 
