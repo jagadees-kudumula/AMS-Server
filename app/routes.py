@@ -1367,9 +1367,14 @@ def generate_otp():
     schedule_id = data.get('schedule_id')
     faculty_id = data.get('faculty_id')
     otp = data.get('otp')
+    topic_discussed = data.get('topic_discussed')  # Get the topic_discussed from request
 
     if not all([schedule_id, faculty_id, otp]):
         return jsonify({'success': False, 'message': 'Missing parameters'}), 400
+
+    # topic_discussed is now required
+    if not topic_discussed or not topic_discussed.strip():
+        return jsonify({'success': False, 'message': 'Attendance topic_discussed is required'}), 400
 
     schedule = Schedule.query.get(schedule_id)
     if not schedule:
@@ -1379,10 +1384,12 @@ def generate_otp():
     if not assignment or assignment.faculty_id != faculty_id:
         return jsonify({'success': False, 'message': 'Faculty not authorized for this schedule'}), 403
 
-    # Store OTP and mark attendance as completed
+    # Store OTP, topic_discussed, and mark attendance as completed
     schedule.otp = otp
     schedule.status = True
+    schedule.topic_discussed = topic_discussed.strip()  # Store the topic_discussed
     db.session.commit()
+    print(f"📝 Attendance marked with topic_discussed: {topic_discussed.strip()}")
 
     # Schedule OTP removal after 45 seconds
     run_date = datetime.now() + timedelta(seconds=45)
@@ -1396,7 +1403,13 @@ def generate_otp():
     )
 
     print(f"⏰ OTP removal scheduled for schedule {schedule_id} at {run_date}")
-    return jsonify({'success': True, 'otp': otp, 'schedule_id': schedule_id}), 200
+    
+    return jsonify({
+        'success': True, 
+        'otp': otp, 
+        'schedule_id': schedule_id,
+        'topic_discussed': topic_discussed.strip()
+    }), 200
 
 def remove_otp_job(schedule_id):
     """Background job to remove OTP after 45 seconds"""
@@ -1419,23 +1432,3 @@ def remove_otp_job(schedule_id):
                 
     except Exception as e:
         print(f"❌ Error removing OTP for schedule {schedule_id}: {str(e)}")
-
-
-
-#To clean the schedules automatically for every 100 days at 5:00PM
-def cleanup_old_schedules(app):
-    
-    with app.app_context():
-        try:            
-            cutoff_date = date.today() - timedelta(days=100)
-            
-            # Delete schedules older than 100 days
-            deleted_count = Schedule.query.filter(Schedule.date < cutoff_date).delete()
-            db.session.commit()
-            
-            print(f"🧹 CLEANUP: Deleted {deleted_count} schedules older than {cutoff_date}")
-            
-        except Exception as e:
-            db.session.rollback()
-            print(f"❌ CLEANUP: Error deleting old schedules: {str(e)}")
-    
