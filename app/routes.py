@@ -1392,7 +1392,7 @@ def generate_otp():
     print(f"📝 Attendance marked with topic_discussed: {topic_discussed.strip()}")
 
     # Schedule OTP removal after 45 seconds
-    run_date = datetime.now() + timedelta(seconds=1000)
+    run_date = datetime.now() + timedelta(seconds=45)
     scheduler.add_job(
         func=remove_otp_job,
         trigger='date',
