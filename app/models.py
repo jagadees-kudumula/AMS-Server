@@ -76,3 +76,32 @@ class CR(db.Model):
     mobile = db.Column(db.String(15), nullable=False)
 
     student = db.relationship('Student', backref='cr_role')
+
+
+class FCMToken(db.Model):
+    __tablename__ = 'fcm_tokens'
+    
+    id = db.Column(db.Integer, primary_key=True)
+    student_email = db.Column(db.String(255), nullable=False, index=True)
+    fcm_token = db.Column(db.Text, nullable=False)
+    device_type = db.Column(db.String(50))  # 'ios' or 'android'
+    created_at = db.Column(db.DateTime, default=db.func.current_timestamp())
+    updated_at = db.Column(db.DateTime, default=db.func.current_timestamp(), onupdate=db.func.current_timestamp())
+    
+    # Unique constraint on email and device_type combination
+    __table_args__ = (
+        db.UniqueConstraint('student_email', 'device_type', name='unique_email_device'),
+    )
+
+
+class NotificationLog(db.Model):
+    __tablename__ = 'notification_logs'
+    
+    id = db.Column(db.Integer, primary_key=True)
+    cr_email = db.Column(db.String(255), nullable=False, index=True)
+    title = db.Column(db.String(255))
+    message = db.Column(db.Text, nullable=False)
+    recipient_count = db.Column(db.Integer)
+    sent_at = db.Column(db.DateTime, default=db.func.current_timestamp())
+    status = db.Column(db.String(50))  # 'success', 'failed', 'partial'
+

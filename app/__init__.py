@@ -19,6 +19,10 @@ def create_app():
 
     from app import models
 
+    # Initialize Firebase Admin SDK
+    from app.firebase_config import initialize_firebase
+    initialize_firebase()
+    
     from app.routes import routes
     app.register_blueprint(routes)
 

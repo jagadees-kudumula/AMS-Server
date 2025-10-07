@@ -1,6 +1,6 @@
 from flask import Flask, request, jsonify, Blueprint,current_app
 from app import db
-from app.models import CR, Student, Faculty, FacultyAssignment, Subject, DefaultSchedule, Schedule, AttendanceRecord
+from app.models import CR, Student, Faculty, FacultyAssignment, Subject, DefaultSchedule, Schedule, AttendanceRecord, FCMToken, NotificationLog
 import pandas as pd
 import io
 import json
@@ -10,6 +10,7 @@ from apscheduler.triggers.cron import CronTrigger
 import atexit
 from sqlalchemy import or_,not_
 from threading import Timer
+import time
 
 routes = Blueprint('main', __name__)
 batchToYear = {'E1':1,'E2':2,'E3':3,'E4':4}
@@ -2140,4 +2141,287 @@ def format_time_12hr(time_str):
         return time_obj.strftime('%I:%M %p')
     except:
         return time_str
+
+
+# ==================== PUSH NOTIFICATION ROUTES ====================
+
+@routes.route('/api/notifications/register-token', methods=['POST'])
+def register_fcm_token():
+    """Register or update FCM token for a student"""
+    try:
+        data = request.get_json()
+        
+        if not data:
+            return jsonify({'success': False, 'error': 'No data provided'}), 400
+        
+        email = data.get('email')
+        fcm_token = data.get('fcm_token')
+        device_type = data.get('device_type', 'android')  # default to android
+        
+        # Validate required fields
+        if not email or not fcm_token:
+            return jsonify({
+                'success': False,
+                'error': 'Email and FCM token are required'
+            }), 400
+        
+        # Validate email domain
+        if not email.endswith('@rguktrkv.ac.in'):
+            return jsonify({
+                'success': False,
+                'error': 'Invalid email domain. Must be @rguktrkv.ac.in'
+            }), 400
+        
+        # Check if student exists
+        student = Student.query.filter_by(email=email).first()
+        if not student:
+            return jsonify({
+                'success': False,
+                'error': 'Student not found'
+            }), 404
+        
+        # Check if token already exists for this email and device
+        existing_token = FCMToken.query.filter_by(
+            student_email=email,
+            device_type=device_type
+        ).first()
+        
+        if existing_token:
+            # Update existing token
+            existing_token.fcm_token = fcm_token
+            existing_token.updated_at = datetime.now()
+        else:
+            # Create new token entry
+            new_token = FCMToken(
+                student_email=email,
+                fcm_token=fcm_token,
+                device_type=device_type
+            )
+            db.session.add(new_token)
+        
+        db.session.commit()
+        
+        return jsonify({
+            'success': True,
+            'message': 'FCM token registered successfully'
+        }), 200
+        
+    except Exception as e:
+        db.session.rollback()
+        print(f"Error registering FCM token: {str(e)}")
+        return jsonify({
+            'success': False,
+            'error': str(e)
+        }), 500
+
+
+@routes.route('/api/cr/send-notification', methods=['POST'])
+def send_class_notification():
+    """CR sends notification to all students in their class"""
+    try:
+        data = request.get_json()
+        
+        if not data:
+            return jsonify({'success': False, 'error': 'No data provided'}), 400
+        
+        cr_email = data.get('cr_email')
+        title = data.get('title', 'Class Update')
+        message_body = data.get('message')
+        
+        # Validate required fields
+        if not cr_email or not message_body:
+            return jsonify({
+                'success': False,
+                'error': 'CR email and message are required'
+            }), 400
+        
+        # 1. Verify CR status and get student info
+        student = Student.query.filter_by(email=cr_email).first()
+        if not student:
+            return jsonify({
+                'success': False,
+                'error': 'Student not found'
+            }), 404
+        
+        # Check if student is a CR
+        cr_record = CR.query.filter_by(student_id=student.id).first()
+        if not cr_record:
+            return jsonify({
+                'success': False,
+                'error': 'Not authorized. Only CRs can send notifications'
+            }), 403
+        
+        # 2. Get all students in the same class (excluding the CR)
+        classmates = Student.query.filter(
+            Student.year == student.year,
+            Student.department == student.department,
+            Student.section == student.section,
+            Student.email != cr_email
+        ).all()
+        
+        if not classmates:
+            return jsonify({
+                'success': False,
+                'error': 'No students found in your class'
+            }), 404
+        
+        student_emails = [s.email for s in classmates]
+        
+        # 3. Get FCM tokens for these students
+        fcm_records = FCMToken.query.filter(
+            FCMToken.student_email.in_(student_emails)
+        ).all()
+        
+        if not fcm_records:
+            return jsonify({
+                'success': False,
+                'error': 'No students with registered devices found'
+            }), 404
+        
+        tokens = [record.fcm_token for record in fcm_records]
+        
+        # 4. Send FCM notification using Firebase Admin SDK
+        try:
+            # Import Firebase Admin SDK (lazy import)
+            from firebase_admin import messaging
+            
+            successful = 0
+            failed = 0
+            
+            # Split tokens into batches of 500 (FCM limit)
+            batch_size = 500
+            for i in range(0, len(tokens), batch_size):
+                batch_tokens = tokens[i:i + batch_size]
+                
+                # Create FCM message
+                message = messaging.MulticastMessage(
+                    notification=messaging.Notification(
+                        title=title,
+                        body=message_body,
+                    ),
+                    data={
+                        'type': 'class_update',
+                        'cr_name': student.name,
+                        'cr_email': cr_email,
+                        'timestamp': str(int(time.time())),
+                        'year': str(student.year),
+                        'department': student.department,
+                        'section': student.section
+                    },
+                    tokens=batch_tokens,
+                    android=messaging.AndroidConfig(
+                        priority='high',
+                        notification=messaging.AndroidNotification(
+                            channel_id='class_updates',
+                            sound='default',
+                            priority='high'
+                        )
+                    ),
+                    apns=messaging.APNSConfig(
+                        payload=messaging.APNSPayload(
+                            aps=messaging.Aps(
+                                sound='default',
+                                badge=1
+                            )
+                        )
+                    )
+                )
+                
+                # Send the message
+                response = messaging.send_multicast(message)
+                successful += response.success_count
+                failed += response.failure_count
+            
+            # 5. Log the notification
+            notification_log = NotificationLog(
+                cr_email=cr_email,
+                title=title,
+                message=message_body,
+                recipient_count=len(tokens),
+                status='success' if failed == 0 else ('partial' if successful > 0 else 'failed')
+            )
+            db.session.add(notification_log)
+            db.session.commit()
+            
+            return jsonify({
+                'success': True,
+                'message': f'Notification sent to {successful} students',
+                'details': {
+                    'total_students': len(classmates),
+                    'registered_devices': len(tokens),
+                    'successful': successful,
+                    'failed': failed
+                }
+            }), 200
+            
+        except ImportError:
+            return jsonify({
+                'success': False,
+                'error': 'Firebase Admin SDK not installed. Please install: pip install firebase-admin'
+            }), 500
+        except Exception as fcm_error:
+            print(f"FCM Error: {str(fcm_error)}")
+            return jsonify({
+                'success': False,
+                'error': f'Failed to send notification: {str(fcm_error)}'
+            }), 500
+        
+    except Exception as e:
+        db.session.rollback()
+        print(f"Error sending notification: {str(e)}")
+        return jsonify({
+            'success': False,
+            'error': str(e)
+        }), 500
+
+
+@routes.route('/api/notifications/history', methods=['GET'])
+def get_notification_history():
+    """Get notification history for a CR"""
+    try:
+        cr_email = request.args.get('cr_email')
+        
+        if not cr_email:
+            return jsonify({
+                'success': False,
+                'error': 'CR email is required'
+            }), 400
+        
+        # Verify CR
+        student = Student.query.filter_by(email=cr_email).first()
+        if not student:
+            return jsonify({'success': False, 'error': 'Student not found'}), 404
+        
+        cr_record = CR.query.filter_by(student_id=student.id).first()
+        if not cr_record:
+            return jsonify({'success': False, 'error': 'Not authorized as CR'}), 403
+        
+        # Get notification history
+        notifications = NotificationLog.query.filter_by(
+            cr_email=cr_email
+        ).order_by(NotificationLog.sent_at.desc()).limit(50).all()
+        
+        history = []
+        for notif in notifications:
+            history.append({
+                'id': notif.id,
+                'title': notif.title,
+                'message': notif.message,
+                'recipient_count': notif.recipient_count,
+                'sent_at': notif.sent_at.isoformat() if notif.sent_at else None,
+                'status': notif.status
+            })
+        
+        return jsonify({
+            'success': True,
+            'notifications': history
+        }), 200
+        
+    except Exception as e:
+        print(f"Error fetching notification history: {str(e)}")
+        return jsonify({
+            'success': False,
+            'error': str(e)
+        }), 500
+
     

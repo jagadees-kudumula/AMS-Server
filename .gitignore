@@ -35,3 +35,11 @@ Thumbs.db
 *.egg-info/
 dist/
 build/
+
+# Firebase credentials - CRITICAL! DO NOT COMMIT!
+serviceAccountKey.json
+firebase-credentials.json
+*-firebase-adminsdk-*.json
+firebase-*.json
+!google-services.json
+
