@@ -30,7 +30,7 @@ class Subject(db.Model):
 class FacultyAssignment(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     faculty_id = db.Column(db.String(20), db.ForeignKey('faculty.id'), nullable=False)
-    subject_code = db.Column(db.String(10), db.ForeignKey('subject.subject_code', ondelete='CASCADE'), nullable=False)
+    subject_code = db.Column(db.String(10), db.ForeignKey('subject.subject_code', ondelete='CASCADE'), nullable=False, index=True)
     year = db.Column(db.Integer, nullable=False, index=True)
     department = db.Column(db.String(50), nullable=False, index=True)
     section = db.Column(db.String(10), nullable=False, index=True)
@@ -41,7 +41,7 @@ class FacultyAssignment(db.Model):
 
 class Schedule(db.Model):
     id = db.Column(db.Integer, primary_key=True)
-    assignment_id = db.Column(db.Integer, db.ForeignKey('faculty_assignment.id', ondelete='CASCADE'), nullable=False)
+    assignment_id = db.Column(db.Integer, db.ForeignKey('faculty_assignment.id', ondelete='CASCADE'), nullable=False, index=True)
     date = db.Column(db.Date, nullable=False)
     start_time = db.Column(db.String(5), nullable=False)
     end_time = db.Column(db.String(5), nullable=False)
@@ -55,8 +55,8 @@ class Schedule(db.Model):
 
 class AttendanceRecord(db.Model):
     id = db.Column(db.Integer, primary_key=True)
-    student_id = db.Column(db.String(20), db.ForeignKey('student.id'), nullable=False)
-    session_id = db.Column(db.Integer, db.ForeignKey('schedule.id'), nullable=False)
+    student_id = db.Column(db.String(20), db.ForeignKey('student.id'), nullable=False, index=True)
+    session_id = db.Column(db.Integer, db.ForeignKey('schedule.id'), nullable=False, index=True)
     status = db.Column(db.Boolean, nullable=False)
 
     student = db.relationship('Student', backref='attendance_record')
