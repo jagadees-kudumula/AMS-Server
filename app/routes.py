@@ -1485,11 +1485,15 @@ def get_student_schedule():
                 session_id=schedule.id
             ).first()
 
+            SubjectDetails = Subject.query.filter_by(subject_code=schedule.subject_code).first()
+
             schedule_data.append({
                 'id': str(schedule.id),
                 'subject': schedule.subject_name,
                 'subject_code': schedule.subject_code,
-                'time': f"{schedule.start_time} - {schedule.end_time}",
+                'subject_mnemonic': SubjectDetails.subject_mnemonic,
+                'subject_type': SubjectDetails.subject_type,
+                'time': f"{format_time_12hr(schedule.start_time)} - {format_time_12hr(schedule.end_time)}",
                 'location': schedule.venue,
                 'date': schedule.date.isoformat(),
                 'faculty_name': schedule.faculty_name,
@@ -1995,6 +1999,122 @@ def get_student_attendance(student_id):
         print(f"Error fetching attendance for student {student_id}: {str(e)}")
         return jsonify({'success': False, 'error': 'Failed to fetch attendance'}), 500
 
+@routes.route('/student/profile/<student_id>', methods=['GET'])
+def get_student_profile(student_id):
+    """Get student profile information (year, department, section)"""
+    try:
+        # Find student by ID
+        student = Student.query.filter_by(id=student_id).first()
+        
+        if not student:
+            return jsonify({
+                'success': False,
+                'error': 'Student not found'
+            }), 404
+        
+        return jsonify({
+            'success': True,
+            'id': student.id,
+            'name': student.name,
+            'email': student.email,
+            'year': yearToBatch[student.year],
+            'department': student.department,
+            'section': student.section
+        }), 200
+        
+    except Exception as e:
+        print(f"Error fetching student profile for {student_id}: {str(e)}")
+        return jsonify({
+            'success': False,
+            'error': 'Failed to fetch student profile'
+        }), 500
+
+@routes.route('/student/history/<student_id>', methods=['GET'])
+def get_student_history(student_id):
+    try:
+        # Get date from query parameter
+        date_str = request.args.get('date')
+        if not date_str:
+            return jsonify({'success': False, 'error': 'Date parameter is required'}), 400
+        
+        # Parse the date
+        try:
+            target_date = datetime.strptime(date_str, '%Y-%m-%d').date()
+        except ValueError:
+            return jsonify({'success': False, 'error': 'Invalid date format. Use YYYY-MM-DD'}), 400
+        
+        # Check if student exists
+        student = db.session.query(Student).filter(Student.id == student_id).first()
+        if not student:
+            return jsonify({'success': False, 'error': 'Student not found'}), 404
+        
+        # First, get all attendance records for this student on the given date
+        # by joining with Schedule to filter by date
+        attendance_records = db.session.query(
+            AttendanceRecord.session_id,
+            AttendanceRecord.status
+        ).join(Schedule, AttendanceRecord.session_id == Schedule.id)\
+        .filter(
+            AttendanceRecord.student_id == student_id,
+            Schedule.date == target_date
+        ).all()
+        
+        # If no attendance records found for this date, return empty history
+        if not attendance_records:
+            return jsonify({
+                'success': True,
+                'history': []
+            }), 200
+        
+        # Extract session IDs
+        session_ids = [record.session_id for record in attendance_records]
+        
+        # Create a mapping of session_id to status for quick lookup
+        status_map = {record.session_id: record.status for record in attendance_records}
+        
+        # Now fetch the schedule and subject details for these session IDs
+        attendance_history = db.session.query(
+            Subject.subject_code,
+            Subject.subject_name,
+            Schedule.id.label('session_id'),
+            Schedule.start_time,
+            Schedule.end_time,
+            Schedule.venue,
+            Schedule.topic_discussed,
+            Faculty.name.label('faculty_name')
+        ).join(FacultyAssignment, Subject.subject_code == FacultyAssignment.subject_code)\
+        .join(Faculty, FacultyAssignment.faculty_id == Faculty.id)\
+        .join(Schedule, FacultyAssignment.id == Schedule.assignment_id)\
+        .filter(Schedule.id.in_(session_ids))\
+        .order_by(Schedule.start_time)\
+        .all()
+        
+        # Format the response
+        history = []
+        for record in attendance_history:
+            # Combine start and end times into single formatted string
+            start_formatted = format_time_12hr(record.start_time)
+            end_formatted = format_time_12hr(record.end_time)
+            time_range = f"{start_formatted} - {end_formatted}"
+            
+            history.append({
+                'subjectCode': record.subject_code,
+                'subject': record.subject_name,
+                'time': time_range,
+                'venue': record.venue,
+                'topicDiscussed': record.topic_discussed,
+                'status': status_map.get(record.session_id),
+                'facultyName': record.faculty_name
+            })
+        return jsonify({
+            'success': True,
+            'history': history
+        }), 200
+        
+    except Exception as e:
+        print(f"Error fetching history for student {student_id}: {str(e)}")
+        return jsonify({'success': False, 'error': 'Failed to fetch student history'}), 500
+
 #To clean the schedules automatically for every 100 days at 5:00PM
 def cleanup_old_schedules(app):
     
@@ -2011,4 +2131,13 @@ def cleanup_old_schedules(app):
         except Exception as e:
             db.session.rollback()
             print(f"❌ CLEANUP: Error deleting old schedules: {str(e)}")
+
+# Helper function to convert 24hr to 12hr format
+def format_time_12hr(time_str):
+    """Convert '08:30' to '08:30 AM' or '14:30' to '02:30 PM'"""
+    try:
+        time_obj = datetime.strptime(time_str, '%H:%M')
+        return time_obj.strftime('%I:%M %p')
+    except:
+        return time_str
     
