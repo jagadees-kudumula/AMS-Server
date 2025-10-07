@@ -1421,6 +1421,92 @@ def remove_otp_job(schedule_id):
         print(f"❌ Error removing OTP for schedule {schedule_id}: {str(e)}")
 
 
+@routes.route('/student/attendance/<student_id>', methods=['GET'])
+def get_student_attendance(student_id):
+    try:
+        # Get student's class info
+        student = db.session.query(Student).filter(Student.id == student_id).first()
+        if not student:
+            return jsonify({'success': False, 'error': 'Student not found'}), 404
+
+        # Single optimized query - no redundant filters needed
+        subject_attendance_data = db.session.query(
+            Subject.subject_code,
+            Subject.subject_name,
+            # Count distinct sessions from attendance records
+            db.func.count(db.distinct(AttendanceRecord.session_id)).label('total_classes'),
+            # Count present records
+            db.func.sum(
+                db.case(
+                    (AttendanceRecord.status == True, 1),
+                    else_=0
+                )
+            ).label('attended_classes')
+        ).join(FacultyAssignment, Subject.subject_code == FacultyAssignment.subject_code)\
+        .join(Schedule, FacultyAssignment.id == Schedule.assignment_id)\
+        .join(AttendanceRecord,
+            db.and_(
+                Schedule.id == AttendanceRecord.session_id,
+                AttendanceRecord.student_id == student_id
+            )
+        )\
+        .filter(
+            FacultyAssignment.year == student.year,
+            FacultyAssignment.department == student.department,
+            FacultyAssignment.section == student.section
+        )\
+        .group_by(Subject.subject_code, Subject.subject_name)\
+        .all()
+
+        # Get all subjects for the student's class
+        all_subjects = db.session.query(
+            Subject.subject_code,
+            Subject.subject_name
+        ).join(FacultyAssignment, Subject.subject_code == FacultyAssignment.subject_code)\
+        .filter(
+            FacultyAssignment.year == student.year,
+            FacultyAssignment.department == student.department,
+            FacultyAssignment.section == student.section
+        ).all()
+
+        # Build final result
+        attendance_dict = {
+            subject_code: {
+                'subject': subject_name,
+                'total': total_classes,
+                'attended': attended_classes or 0
+            }
+            for subject_code, subject_name, total_classes, attended_classes in subject_attendance_data
+        }
+
+        total_all_classes = 0
+        total_attended_classes = 0
+        subject_attendance = []
+
+        for subject_code, subject_name in all_subjects:
+            if subject_code in attendance_dict:
+                data = attendance_dict[subject_code]
+                subject_attendance.append(data)
+                total_all_classes += data['total']
+                total_attended_classes += data['attended']
+            else:
+                subject_attendance.append({
+                    'subject': subject_name,
+                    'total': 0,
+                    'attended': 0
+                })
+
+        overall_percentage = round((total_attended_classes / total_all_classes) * 100, 2) if total_all_classes > 0 else 0
+
+        return jsonify({
+            'success': True,
+            'subjects': subject_attendance,
+            'overall': overall_percentage
+        }), 200
+
+    except Exception as e:
+        print(f"Error fetching attendance for student {student_id}: {str(e)}")
+        return jsonify({'success': False, 'error': 'Failed to fetch attendance'}), 500
 
 #To clean the schedules automatically for every 100 days at 5:00PM
 def cleanup_old_schedules(app):
