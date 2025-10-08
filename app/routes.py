@@ -2222,6 +2222,72 @@ def register_fcm_token():
         }), 500
 
 
+@routes.route('/api/notifications/remove-token', methods=['POST'])
+def remove_fcm_token():
+    """Remove FCM token for a student (when permission is revoked)"""
+    try:
+        data = request.get_json()
+        
+        if not data:
+            return jsonify({'success': False, 'error': 'No data provided'}), 400
+        
+        email = data.get('email')
+        fcm_token = data.get('fcm_token')  # May be null if permission already revoked
+        device_type = data.get('device_type', 'android')  # default to android
+        
+        # Validate required fields
+        if not email:
+            return jsonify({
+                'success': False,
+                'error': 'Email is required'
+            }), 400
+        
+        # Check if student exists
+        student = Student.query.filter_by(email=email).first()
+        if not student:
+            return jsonify({
+                'success': False,
+                'error': 'Student not found'
+            }), 404
+        
+        # Remove token based on email and device type
+        # If fcm_token is provided, match it as well for extra safety
+        if fcm_token:
+            deleted_count = FCMToken.query.filter_by(
+                student_email=email,
+                device_type=device_type,
+                fcm_token=fcm_token
+            ).delete()
+        else:
+            # If no token provided, remove all tokens for this email and device type
+            deleted_count = FCMToken.query.filter_by(
+                student_email=email,
+                device_type=device_type
+            ).delete()
+        
+        db.session.commit()
+        
+        if deleted_count > 0:
+            return jsonify({
+                'success': True,
+                'message': 'FCM token removed successfully'
+            }), 200
+        else:
+            # Token not found, but that's okay - the end result is the same
+            return jsonify({
+                'success': True,
+                'message': 'FCM token removed successfully'
+            }), 200
+        
+    except Exception as e:
+        db.session.rollback()
+        print(f"Error removing FCM token: {str(e)}")
+        return jsonify({
+            'success': False,
+            'error': str(e)
+        }), 500
+
+
 @routes.route('/api/cr/send-notification', methods=['POST'])
 def send_class_notification():
     """CR sends notification to all students in their class"""
