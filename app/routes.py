@@ -1524,6 +1524,8 @@ def get_student_schedule():
                 Schedule.otp_created_at,
                 Subject.subject_name,
                 Subject.subject_code,
+                Subject.subject_mnemonic,
+                Subject.subject_type,
                 Faculty.name.label('faculty_name')
             )\
             .all()
@@ -1545,15 +1547,15 @@ def get_student_schedule():
                 'id': str(schedule.id),
                 'subject': schedule.subject_name,
                 'subject_code': schedule.subject_code,
-                'subject_mnemonic': SubjectDetails.subject_mnemonic,
-                'subject_type': SubjectDetails.subject_type,
+                'subject_mnemonic': schedule.subject_mnemonic,
+                'subject_type': schedule.subject_type,
                 'time': f"{format_time_12hr(schedule.start_time)} - {format_time_12hr(schedule.end_time)}",
                 'location': schedule.venue,
                 'date': schedule.date.isoformat(),
                 'faculty_name': schedule.faculty_name,
                 'status': schedule.status,
                 'otp': schedule.otp,
-                'otp_created_at': schedule.otp_created_at.isoformat() + 'Z' if schedule.otp_created_at else None,  # ISO 8601 format with UTC indicator
+                'otp_created_at': schedule.otp_created_at,
                 'attendance_marked': attendance_record is not None,
                 'attendance_status': attendance_record.status if attendance_record else None,
                 # FIX: Add raw time fields for frontend calculations
@@ -1561,7 +1563,6 @@ def get_student_schedule():
                 'end_time': schedule.end_time,      # Raw format: "09:30"
             })
 
-        
         # Separate today and tomorrow schedules
         today_schedule = [s for s in schedule_data if s['date'] == today.isoformat()]
         tomorrow_schedule = [s for s in schedule_data if s['date'] == tomorrow.isoformat()]
@@ -2330,6 +2331,72 @@ def register_fcm_token():
     except Exception as e:
         db.session.rollback()
         print(f"Error registering FCM token: {str(e)}")
+        return jsonify({
+            'success': False,
+            'error': str(e)
+        }), 500
+
+
+@routes.route('/api/notifications/remove-token', methods=['POST'])
+def remove_fcm_token():
+    """Remove FCM token for a student (when permission is revoked)"""
+    try:
+        data = request.get_json()
+        
+        if not data:
+            return jsonify({'success': False, 'error': 'No data provided'}), 400
+        
+        email = data.get('email')
+        fcm_token = data.get('fcm_token')  # May be null if permission already revoked
+        device_type = data.get('device_type', 'android')  # default to android
+        
+        # Validate required fields
+        if not email:
+            return jsonify({
+                'success': False,
+                'error': 'Email is required'
+            }), 400
+        
+        # Check if student exists
+        student = Student.query.filter_by(email=email).first()
+        if not student:
+            return jsonify({
+                'success': False,
+                'error': 'Student not found'
+            }), 404
+        
+        # Remove token based on email and device type
+        # If fcm_token is provided, match it as well for extra safety
+        if fcm_token:
+            deleted_count = FCMToken.query.filter_by(
+                student_email=email,
+                device_type=device_type,
+                fcm_token=fcm_token
+            ).delete()
+        else:
+            # If no token provided, remove all tokens for this email and device type
+            deleted_count = FCMToken.query.filter_by(
+                student_email=email,
+                device_type=device_type
+            ).delete()
+        
+        db.session.commit()
+        
+        if deleted_count > 0:
+            return jsonify({
+                'success': True,
+                'message': 'FCM token removed successfully'
+            }), 200
+        else:
+            # Token not found, but that's okay - the end result is the same
+            return jsonify({
+                'success': True,
+                'message': 'FCM token removed successfully'
+            }), 200
+        
+    except Exception as e:
+        db.session.rollback()
+        print(f"Error removing FCM token: {str(e)}")
         return jsonify({
             'success': False,
             'error': str(e)
