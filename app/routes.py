@@ -1437,7 +1437,6 @@ def remove_otp_job(schedule_id):
     except Exception as e:
         print(f"❌ Error removing OTP for schedule {schedule_id}: {str(e)}")
 
-
 @routes.route('/api/student/schedule', methods=['GET'])
 def get_student_schedule():
     """Get today's and tomorrow's schedule for a student (only actual schedules)"""
@@ -1477,6 +1476,8 @@ def get_student_schedule():
                 Schedule.otp_created_at,
                 Subject.subject_name,
                 Subject.subject_code,
+                Subject.subject_mnemonic,
+                Subject.subject_type,
                 Faculty.name.label('faculty_name')
             )\
             .all()
@@ -1490,27 +1491,26 @@ def get_student_schedule():
                 session_id=schedule.id
             ).first()
 
-            SubjectDetails = Subject.query.filter_by(subject_code=schedule.subject_code).first()
-
-
             schedule_data.append({
                 'id': str(schedule.id),
                 'subject': schedule.subject_name,
                 'subject_code': schedule.subject_code,
-                'subject_mnemonic': SubjectDetails.subject_mnemonic,
-                'subject_type': SubjectDetails.subject_type,
+                'subject_mnemonic': schedule.subject_mnemonic,
+                'subject_type': schedule.subject_type,
                 'time': f"{format_time_12hr(schedule.start_time)} - {format_time_12hr(schedule.end_time)}",
                 'location': schedule.venue,
                 'date': schedule.date.isoformat(),
                 'faculty_name': schedule.faculty_name,
                 'status': schedule.status,
                 'otp': schedule.otp,
-                'otp_created_at': schedule.otp_created_at.isoformat() + 'Z' if schedule.otp_created_at else None,  # ISO 8601 format with UTC indicator
+                'otp_created_at': schedule.otp_created_at,
                 'attendance_marked': attendance_record is not None,
                 'attendance_status': attendance_record.status if attendance_record else None,
+                # Raw time fields for frontend calculations
+                'start_time': schedule.start_time,
+                'end_time': schedule.end_time,
             })
 
-        
         # Separate today and tomorrow schedules
         today_schedule = [s for s in schedule_data if s['date'] == today.isoformat()]
         tomorrow_schedule = [s for s in schedule_data if s['date'] == tomorrow.isoformat()]
