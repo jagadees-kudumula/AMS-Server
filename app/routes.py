@@ -1442,7 +1442,7 @@ def generate_otp():
     print(f"⏰ OTP created at: {schedule.otp_created_at.isoformat()}")
 
     # Schedule OTP removal after 45 seconds
-    run_date = datetime.now() + timedelta(seconds=1000)
+    run_date = datetime.now() + timedelta(seconds=45)
     scheduler.add_job(
         func=remove_otp_job,
         trigger='date',
@@ -1545,17 +1545,17 @@ def get_student_schedule():
 
             schedule_data.append({
                 'id': str(schedule.id),
-                'subject': schedule.subject_name,
-                'subject_code': schedule.subject_code,
-                'subject_mnemonic': schedule.subject_mnemonic,
-                'subject_type': schedule.subject_type,
+                'subject': SubjectDetails.subject_name,
+                'subject_code': SubjectDetails.subject_code,
+                'subject_mnemonic': SubjectDetails.subject_mnemonic,
+                'subject_type': SubjectDetails.subject_type,
                 'time': f"{format_time_12hr(schedule.start_time)} - {format_time_12hr(schedule.end_time)}",
                 'location': schedule.venue,
                 'date': schedule.date.isoformat(),
                 'faculty_name': schedule.faculty_name,
                 'status': schedule.status,
                 'otp': schedule.otp,
-                'otp_created_at': schedule.otp_created_at,
+                'otp_created_at': schedule.otp_created_at.isoformat() + 'Z' if schedule.otp_created_at else None,
                 'attendance_marked': attendance_record is not None,
                 'attendance_status': attendance_record.status if attendance_record else None,
                 # FIX: Add raw time fields for frontend calculations
