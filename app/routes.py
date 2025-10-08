@@ -1385,12 +1385,14 @@ def generate_otp():
     if not assignment or assignment.faculty_id != faculty_id:
         return jsonify({'success': False, 'message': 'Faculty not authorized for this schedule'}), 403
 
-    # Store OTP, topic_discussed, and mark attendance as completed
+    # Store OTP with creation timestamp, topic_discussed, and mark attendance as completed
     schedule.otp = otp
+    schedule.otp_created_at = datetime.utcnow()  # Store UTC timestamp when OTP is created
     schedule.status = True
     schedule.topic_discussed = topic_discussed.strip()  # Store the topic_discussed
     db.session.commit()
     print(f"📝 Attendance marked with topic_discussed: {topic_discussed.strip()}")
+    print(f"⏰ OTP created at: {schedule.otp_created_at.isoformat()}")
 
     # Schedule OTP removal after 45 seconds
     run_date = datetime.now() + timedelta(seconds=45)
@@ -1426,6 +1428,7 @@ def remove_otp_job(schedule_id):
             schedule = Schedule.query.get(schedule_id)
             if schedule:
                 schedule.otp = ""
+                schedule.otp_created_at = None  # Clear timestamp when OTP is removed
                 db.session.commit()
                 print(f"✅ OTP cleared for schedule {schedule_id}")
             else:
@@ -1471,6 +1474,7 @@ def get_student_schedule():
                 Schedule.venue,
                 Schedule.status,
                 Schedule.otp,
+                Schedule.otp_created_at,
                 Subject.subject_name,
                 Subject.subject_code,
                 Faculty.name.label('faculty_name')
@@ -1488,6 +1492,7 @@ def get_student_schedule():
 
             SubjectDetails = Subject.query.filter_by(subject_code=schedule.subject_code).first()
 
+
             schedule_data.append({
                 'id': str(schedule.id),
                 'subject': schedule.subject_name,
@@ -1500,10 +1505,12 @@ def get_student_schedule():
                 'faculty_name': schedule.faculty_name,
                 'status': schedule.status,
                 'otp': schedule.otp,
+                'otp_created_at': schedule.otp_created_at.isoformat() + 'Z' if schedule.otp_created_at else None,  # ISO 8601 format with UTC indicator
                 'attendance_marked': attendance_record is not None,
                 'attendance_status': attendance_record.status if attendance_record else None,
             })
 
+        
         # Separate today and tomorrow schedules
         today_schedule = [s for s in schedule_data if s['date'] == today.isoformat()]
         tomorrow_schedule = [s for s in schedule_data if s['date'] == tomorrow.isoformat()]
@@ -2328,7 +2335,7 @@ def send_class_notification():
                 )
                 
                 # Send the message
-                response = messaging.send_multicast(message)
+                response = messaging.send_each_for_multicast(message)
                 successful += response.success_count
                 failed += response.failure_count
             

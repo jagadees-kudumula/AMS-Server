@@ -48,6 +48,7 @@ class Schedule(db.Model):
     status = db.Column(db.Boolean, default=False)
     venue = db.Column(db.String(50))
     otp=db.Column(db.String(6) ,nullable=True)
+    otp_created_at = db.Column(db.DateTime, nullable=True)
     topic_discussed = db.Column(db.String(100))
 
     assignment = db.relationship('FacultyAssignment', backref='schedules')

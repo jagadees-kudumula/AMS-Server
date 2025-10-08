@@ -26,4 +26,9 @@ def create_app():
     from app.routes import routes
     app.register_blueprint(routes)
 
+    # Ensure database sessions are properly closed after each request
+    @app.teardown_appcontext
+    def shutdown_session(exception=None):
+        db.session.remove()
+
     return app
