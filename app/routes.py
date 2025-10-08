@@ -1281,10 +1281,14 @@ def start_daily_scheduler(app):
         id='daily_schedule_move',
         name='Move tomorrow schedules daily at 5:58 PM'
     )
+
+    start_cleanup_scheduler(app)
+
    
     # Start the scheduler
     scheduler.start()
     print("✅ Daily scheduler started - will run at 17:58 every day")
+
     
     # Proper shutdown when app stops
     atexit.register(lambda: scheduler.shutdown())
@@ -1362,13 +1366,14 @@ def get_server_time():
         print(f"Error fetching server time: {str(e)}")
         return jsonify({'success': False, 'error': 'Failed to fetch server time'}), 500
     
+
 @routes.route('/generate-otp', methods=['POST'])
 def generate_otp():
     data = request.get_json()
     schedule_id = data.get('schedule_id')
     faculty_id = data.get('faculty_id')
     otp = data.get('otp')
-    topic_discussed = data.get('topic_discussed')  # Get the topic_discussed from request
+    topic_discussed = data.get('topic_discussed') 
 
     if not all([schedule_id, faculty_id, otp]):
         return jsonify({'success': False, 'message': 'Missing parameters'}), 400
@@ -1381,6 +1386,7 @@ def generate_otp():
     if not schedule:
         return jsonify({'success': False, 'message': 'Schedule not found'}), 404
 
+    # Get the assignment to check authorization and get class info
     assignment = FacultyAssignment.query.get(schedule.assignment_id)
     if not assignment or assignment.faculty_id != faculty_id:
         return jsonify({'success': False, 'message': 'Faculty not authorized for this schedule'}), 403
@@ -1389,13 +1395,54 @@ def generate_otp():
     schedule.otp = otp
     schedule.otp_created_at = datetime.utcnow()  # Store UTC timestamp when OTP is created
     schedule.status = True
-    schedule.topic_discussed = topic_discussed.strip()  # Store the topic_discussed
-    db.session.commit()
+    schedule.topic_discussed = topic_discussed.strip()
+    
+    # Create attendance records for all students in that year, department, and section
+    try:
+        # Get students based on the assignment's criteria
+        students = Student.query.filter_by(
+            year=assignment.year,
+            department=assignment.department,  # Changed from 'dept'
+            section=assignment.section          # Changed from 'branch'
+        ).all()
+        
+        print(f"🎯 Found {len(students)} students for:")
+        print(f"   Year: {assignment.year}")
+        print(f"   Department: {assignment.department}")
+        print(f"   Section: {assignment.section}")
+        
+        # Create attendance records with status=False (absent by default)
+        for student in students:
+            # Check if attendance record already exists to avoid duplicates
+            existing_record = AttendanceRecord.query.filter_by(
+                student_id=student.id,
+                session_id=schedule_id
+            ).first()
+            
+            if not existing_record:
+                attendance_record = AttendanceRecord(
+                    student_id=student.id,
+                    session_id=schedule_id,
+                    status=False  # Default to absent, will be updated when they submit OTP
+                )
+                db.session.add(attendance_record)
+                print(f"📝 Created attendance record for student {student.id} - Status: False")
+            else:
+                print(f"ℹ️ Attendance record already exists for student {student.id}")
+        
+        db.session.commit()
+        print(f"✅ Created/updated {len(students)} attendance records for schedule {schedule_id}")
+        
+    except Exception as e:
+        db.session.rollback()
+        print(f"❌ Error creating attendance records: {str(e)}")
+        return jsonify({'success': False, 'message': f'Error creating attendance records: {str(e)}'}), 500
+
     print(f"📝 Attendance marked with topic_discussed: {topic_discussed.strip()}")
     print(f"⏰ OTP created at: {schedule.otp_created_at.isoformat()}")
 
     # Schedule OTP removal after 45 seconds
-    run_date = datetime.now() + timedelta(seconds=45)
+    run_date = datetime.now() + timedelta(seconds=1000)
     scheduler.add_job(
         func=remove_otp_job,
         trigger='date',
@@ -1411,7 +1458,8 @@ def generate_otp():
         'success': True, 
         'otp': otp, 
         'schedule_id': schedule_id,
-        'topic_discussed': topic_discussed.strip()
+        'topic_discussed': topic_discussed.strip(),
+        'attendance_records_created': len(students)
     }), 200
 
 def remove_otp_job(schedule_id):
@@ -1491,6 +1539,10 @@ def get_student_schedule():
                 session_id=schedule.id
             ).first()
 
+            SubjectDetails = Subject.query.filter_by(subject_code=schedule.subject_code).first()
+
+            # FIX: Include raw start_time and end_time for frontend calculations
+
             schedule_data.append({
                 'id': str(schedule.id),
                 'subject': schedule.subject_name,
@@ -1506,9 +1558,9 @@ def get_student_schedule():
                 'otp_created_at': schedule.otp_created_at,
                 'attendance_marked': attendance_record is not None,
                 'attendance_status': attendance_record.status if attendance_record else None,
-                # Raw time fields for frontend calculations
-                'start_time': schedule.start_time,
-                'end_time': schedule.end_time,
+                # FIX: Add raw time fields for frontend calculations
+                'start_time': schedule.start_time,  # Raw format: "08:30"
+                'end_time': schedule.end_time,      # Raw format: "09:30"
             })
 
         # Separate today and tomorrow schedules
@@ -1856,8 +1908,6 @@ def verify_otp():
             'message': 'Internal server error'
         }), 500
     
-from flask import request, jsonify
-from datetime import datetime
 
 @routes.route('/api/attendance/mark', methods=['POST'])
 def mark_attendance():
@@ -1869,55 +1919,53 @@ def mark_attendance():
         
         email = data.get('email')
         session_id = data.get('session_id')
+        
         if not email or not session_id:
             return jsonify({'error': 'Email and session_id are required'}), 400
         
-        # Extract student ID from email (assuming email format is like "e1234@example.com")
-        # Remove domain and get the student ID part
-        student_id = email.split('@')[0].upper()  # This gives "e1234"
+        # Extract student ID from email
+        student_id = email.split('@')[0].upper()
         
-        # Verify if student exists
-        student = Student.query.filter_by(id=student_id).first()
-        if not student:
-            return jsonify({'error': 'Student not found'}), 404
+        print(f"🎯 Marking attendance for student: {student_id}, session: {session_id}")
         
-        # Verify if session exists
-        session = Schedule.query.filter_by(id=session_id).first()
-        if not session:
-            return jsonify({'error': 'Class session not found'}), 404
-        
-        # Check if attendance already exists for this student and session
-        existing_attendance = AttendanceRecord.query.filter_by(
+        # Check if attendance record exists
+        attendance_record = AttendanceRecord.query.filter_by(
             student_id=student_id, 
             session_id=session_id
         ).first()
         
-        if existing_attendance:
-            return jsonify({'error': 'Attendance already marked for this session'}), 409
-        print(student_id)
-        # Create new attendance record
-        new_attendance = AttendanceRecord(
-            student_id=student_id,
-            session_id=session_id,
-            status=True  # Mark as present
-        )
+        if not attendance_record:
+            print(f"❌ No attendance record found for {student_id} in session {session_id}")
+            return jsonify({'error': 'Attendance record not found for this session'}), 404
         
-        db.session.add(new_attendance)
+        print(f"📊 Found record - Current status: {attendance_record.status}")
+        
+        # Check if already marked present
+        if attendance_record.status:
+            print(f"ℹ️ Attendance already marked for {student_id} in session {session_id}")
+            return jsonify({
+                'error': 'Attendance already marked for this session',
+                'already_marked': True
+            }), 409
+        
+        # Update from False to True
+        attendance_record.status = True
         db.session.commit()
+        
+        print(f"✅ Successfully updated attendance for {student_id} from absent to present")
         
         return jsonify({
             'success': True,
             'message': 'Attendance marked successfully',
-            'attendance_id': new_attendance.id,
             'student_id': student_id,
-            'session_id': session_id
-        }), 201
+            'session_id': session_id,
+            'timestamp': datetime.now().isoformat()
+        }), 200
         
     except Exception as e:
         db.session.rollback()
+        print(f"❌ Error marking attendance: {str(e)}")
         return jsonify({'error': f'Failed to mark attendance: {str(e)}'}), 500
-    
-
 
 
 @routes.route('/student/attendance/<student_id>', methods=['GET'])
@@ -2148,6 +2196,73 @@ def format_time_12hr(time_str):
         return time_obj.strftime('%I:%M %p')
     except:
         return time_str
+
+def cleanup_expired_schedules():
+    """Automatically delete schedules that have expired (end_time + 30 minutes)"""
+    try:
+        from app import create_app, db
+        from app.models import Schedule
+        from datetime import datetime, timedelta
+        
+        app = create_app()
+        
+        with app.app_context():
+            current_time = datetime.now()
+            print(f"🕒 Cleanup running at: {current_time}")
+            
+            # Get all schedules with status=False and no OTP
+            potential_schedules = Schedule.query.filter(
+                Schedule.status == False,
+                db.or_(Schedule.otp == "", Schedule.otp.is_(None))
+            ).all()
+            
+            print(f"🔍 Found {len(potential_schedules)} schedules with status=False and no OTP")
+            
+            deleted_count = 0
+            for schedule in potential_schedules:
+                # Calculate when this schedule expires (end_time + 30 minutes)
+                schedule_end_datetime = datetime.combine(
+                    schedule.date, 
+                    datetime.strptime(schedule.end_time, '%H:%M').time()
+                )
+                schedule_expiry_time = schedule_end_datetime + timedelta(minutes=30)
+                
+                # Check if expired (current time > end_time + 30 minutes)
+                if current_time > schedule_expiry_time:
+                    db.session.delete(schedule)
+                    deleted_count += 1
+                    print(f"🗑️ Deleted schedule {schedule.id} - "
+                          f"Ended: {schedule_end_datetime.strftime('%Y-%m-%d %H:%M')}, "
+                          f"Expired: {schedule_expiry_time.strftime('%Y-%m-%d %H:%M')}")
+                else:
+                    print(f"⏳ Schedule {schedule.id} still valid - "
+                          f"Ends: {schedule_end_datetime.strftime('%Y-%m-%d %H:%M')}, "
+                          f"Expires: {schedule_expiry_time.strftime('%Y-%m-%d %H:%M')}")
+            
+            db.session.commit()
+            print(f"✅ Auto-cleanup: Deleted {deleted_count} expired schedules")
+            
+    except Exception as e:
+        print(f"❌ Error in auto-cleanup: {str(e)}")
+
+# Add this to your scheduler
+def start_cleanup_scheduler(app):
+    """Start scheduler for automatic cleanup of expired schedules"""
+    global scheduler
+    
+    # Add cleanup job to run every 5 minutes
+    scheduler.add_job(
+        func=cleanup_expired_schedules,
+        trigger='interval',
+        minutes=5,
+        id='cleanup_expired_schedules',
+        name='Clean up expired schedules every 5 minutes'
+    )
+    
+    print("✅ Cleanup scheduler started - will run every 5 minutes")
+
+
+
 
 
 # ==================== PUSH NOTIFICATION ROUTES ====================
@@ -2497,4 +2612,4 @@ def get_notification_history():
             'error': str(e)
         }), 500
 
-    
+
