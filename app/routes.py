@@ -4,7 +4,7 @@ from app.models import CR, Student, Faculty, FacultyAssignment, Subject, Default
 import pandas as pd
 import io
 import json
-from datetime import datetime, date, timedelta
+from datetime import datetime, date, timedelta, timezone
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 import atexit
@@ -28,7 +28,6 @@ def upload_students():
     department = request.form['department']
 
     if file.filename == '':
-        print("Error 1")
         return jsonify({'error': 'No selected file'}), 400
 
     try:
@@ -117,7 +116,6 @@ def remove_cr(student_id):
     except Exception as e:
         # If any database error occurs, roll back the session
         db.session.rollback()
-        print(e)
         return jsonify({'success': False, 'message': 'Server error, could not remove CR.'}), 500
 
 @routes.route('/crs/add', methods=['POST'])
@@ -125,8 +123,6 @@ def add_cr():
     data = request.form
     student_id = data['id']
     mobile = data['mobile']
-
-    print(student_id, mobile)
 
     # Check if the student exists
     student = Student.query.get(student_id)
@@ -156,7 +152,6 @@ def add_cr():
         return jsonify({'success': True, 'message': 'CR added successfully.', 'newcr' : new_cr}), 201
     except Exception as e:
         db.session.rollback()
-        print(e)
         return jsonify({'success': False, 'message': 'Server error, could not add CR.'}), 500
 
 @routes.route('/faculties', methods=['GET'])
@@ -187,7 +182,6 @@ def get_faculties():
     
         return jsonify({'success': True, 'faculties': faculty_list}), 200
     except Exception as e:
-        print(e)
         return jsonify({'success': False, 'message': 'Server error, could not fetch faculties.'}), 500
 
 @routes.route('/faculties/upload_faculty', methods=['POST'])
@@ -324,7 +318,6 @@ def add_faculty():
         
     except Exception as e:
         db.session.rollback()
-        print(f"Error adding faculty: {str(e)}")
         return jsonify({'success': False, 'message': 'Server error, could not add faculty.'}), 500
 
 @routes.route('/faculties/remove/<int:assignment_id>', methods=['DELETE'])
@@ -359,7 +352,6 @@ def remove_faculty_assignment(assignment_id):
     except Exception as e:
         # If any database error occurs, roll back the session
         db.session.rollback()
-        print(e)
         return jsonify({'success': False, 'message': 'Server error, could not remove faculty assignment.'}), 500
 
 @routes.route('/faculties/update/<int:assignment_id>', methods=['PUT'])
@@ -420,7 +412,6 @@ def update_faculty_assignment(assignment_id):
     except Exception as e:
         # If any database error occurs, roll back the session
         db.session.rollback()
-        print(e)
         return jsonify({'success': False, 'message': 'Server error, could not update faculty assignment.'}), 500
 
 @routes.route('/subjects/upload', methods=['POST'])
@@ -432,7 +423,6 @@ def upload_subjects():
     isreplace = request.form['replace']
 
     if file.filename == '':
-        print("Error 1")
         return jsonify({'error': 'No selected file'}), 400
 
     try:
@@ -442,7 +432,6 @@ def upload_subjects():
                 db.session.commit()
             except Exception as e:
                 db.session.rollback()
-                print(str(e))
                 return jsonify({'message': str(e)}), 500
 
         # Read Excel into a DataFrame
@@ -591,7 +580,8 @@ def get_faculty_schedule(faculty_id):
                 'start_time': schedule.start_time,
                 'end_time': schedule.end_time,
                 'venue': schedule.venue or '',
-                'status': schedule.status
+                'status': schedule.status,
+                'otp': schedule.otp or ''
             }
             schedule_list.append(schedule_data)
         
@@ -607,7 +597,6 @@ def get_faculty_schedule(faculty_id):
         }), 200
         
     except Exception as e:
-        print(f"Error fetching faculty schedule: {str(e)}")
         return jsonify({'success': False, 'error': 'Failed to fetch schedule'}), 500
     
 #Subjects of facultyId   
@@ -635,7 +624,6 @@ def get_faculty_subjects(faculty_id):
         }), 200
         
     except Exception as e:
-        print(f"Error fetching faculty subjects: {str(e)}")
         return jsonify({'success': False, 'error': 'Failed to fetch subjects'}), 500
 
 # Available Time Slots Endpoint
@@ -677,9 +665,6 @@ def get_available_slots(faculty_id):
                 FacultyAssignment.section == section,
                 Schedule.date == target_date
             ).all()
-
-        print(f"Found {len(existing_schedules)} existing schedules for conflict checking")
-
         if subject_type == "lab":
             # Lab: 3-hour slots (consecutive periods)
             for i in range(len(all_slots) - 2):
@@ -693,7 +678,6 @@ def get_available_slots(faculty_id):
                     # Check if time slots overlap
                     if not (slot_end <= existing.start_time or slot_start >= existing.end_time):
                         conflict = True
-                        print(f"Conflict found: {slot_start}-{slot_end} vs {existing.start_time}-{existing.end_time}")
                         break
                 if not conflict:
                     available_slots.append({
@@ -707,15 +691,12 @@ def get_available_slots(faculty_id):
                 for existing in existing_schedules:
                     if not (slot_end <= existing.start_time or slot_start >= existing.end_time):
                         conflict = True
-                        print(f"Conflict found: {slot_start}-{slot_end} vs {existing.start_time}-{existing.end_time}")
                         break
                 if not conflict:
                     available_slots.append({
                         'start_time': slot_start,
                         'end_time': slot_end
                     })
-
-        print(f"Available slots: {available_slots}")
 
         return jsonify({
             'success': True,
@@ -724,7 +705,6 @@ def get_available_slots(faculty_id):
         }), 200
 
     except Exception as e:
-        print(f"Error fetching available slots: {str(e)}")
         return jsonify({'success': False, 'error': str(e)}), 500
     
 # Create Schedule Endpoint
@@ -732,7 +712,6 @@ def get_available_slots(faculty_id):
 def create_schedule():
     try:
         data = request.get_json()
-        print(f"📥 Received schedule creation request: {data}")
         
         # Handle both batch codes (E1, E2) and actual years (1, 2)
         year_input = data['year']
@@ -749,8 +728,6 @@ def create_schedule():
             except (ValueError, TypeError):
                 return jsonify({'success': False, 'error': 'Invalid year format'}), 400
         
-        print(f"🔍 Looking for faculty assignment with: faculty_id={data['faculty_id']}, year={year}, department={data['department']}, section={data['section']}")
-        
         # Find the faculty assignment
         assignment = FacultyAssignment.query.filter_by(
             faculty_id=data['faculty_id'],
@@ -765,16 +742,10 @@ def create_schedule():
                 faculty_id=data['faculty_id']
             ).all()
             
-            print(f"❌ No assignment found. Available assignments for faculty {data['faculty_id']}:")
-            for fa in faculty_assignments:
-                print(f"  - Year: {fa.year}, Department: {fa.department}, Section: {fa.section}")
-            
             return jsonify({
                 'success': False, 
                 'error': f'No faculty assignment found for {batch_display} {data["department"]} - {data["section"]}. Faculty may not be assigned to this class.'
             }), 400
-        
-        print(f"✅ Found faculty assignment: {assignment.id}")
         
         target_date = datetime.strptime(data['date'], '%Y-%m-%d').date()
         
@@ -786,8 +757,6 @@ def create_schedule():
                 FacultyAssignment.faculty_id == data['faculty_id']
             )\
             .all()
-        
-        print(f"🔍 Checking conflicts: Found {len(existing_conflicts)} existing schedules")
         
         # Check each existing schedule for time overlap
         for existing in existing_conflicts:
@@ -811,8 +780,6 @@ def create_schedule():
         db.session.add(new_schedule)
         db.session.commit()
         
-        print(f"✅ Schedule created successfully: ID {new_schedule.id}")
-        
         return jsonify({
             'success': True,
             'message': f'Class scheduled successfully for {batch_display} {data["department"]} - {data["section"]} on {target_date}',
@@ -826,7 +793,6 @@ def create_schedule():
         
     except Exception as e:
         db.session.rollback()
-        print(f"❌ Error creating schedule: {str(e)}")
         return jsonify({'success': False, 'error': str(e)}), 500
     
 
@@ -848,111 +814,161 @@ def delete_schedule(schedule_id):
         
     except Exception as e:
         db.session.rollback()
-        print(f"Error deleting schedule: {str(e)}")
         return jsonify({'success': False, 'error': str(e)}), 500
 
 
 @routes.route('/faculty/dashboard/<faculty_id>', methods=['GET'])
 def get_faculty_dashboard(faculty_id):
+    """
+    Get faculty dashboard with statistics for all assigned classes.
+    
+    This endpoint returns:
+    1. Faculty information
+    2. List of all assigned subjects/classes
+    3. Statistics for each class (ONLY completed sessions where status=True)
+    4. Overall aggregated statistics
+    
+    Key Metrics Explained:
+    - completedSessions: Number of classes where status=True (attendance was taken)
+    - classAttendanceAvg: Average attendance % for THIS specific class
+    - overallAttendanceAvg: Average attendance % across ALL classes taught by faculty
+    
+    Args:
+        faculty_id: Faculty identifier (e.g., 'F001')
+    
+    Returns:
+        JSON with faculty info, classes data, and aggregated statistics
+    """
     try:
-        # Verify faculty exists
-        print(faculty_id)
+        # Step 1: Verify faculty exists
         faculty = Faculty.query.get(faculty_id)
         if not faculty:
-            print("B")
             return jsonify({
                 'success': False,
                 'message': 'Faculty not found'
             }), 404
 
-        # Get all assignments for this faculty
+        # Step 2: Get all class assignments for this faculty
         assignments = FacultyAssignment.query.filter_by(faculty_id=faculty_id).all()
         
         if not assignments:
             return jsonify({
                 'success': True,
                 'message': 'No classes assigned',
+                'faculty': {
+                    'id': faculty.id,
+                    'name': faculty.name,
+                    'email': faculty.email
+                },
                 'classes': [],
                 'stats': {
-                    'totalClasses': 0,
-                    'totalSessions': 0,
-                    'avgAttendance': 0,
-                    'overallAvg': 0
+                    'totalAssignments': 0,
+                    'totalCompletedSessions': 0,
+                    'overallAttendanceAvg': 0
                 }
             })
 
+        # Step 3: Process each assignment and calculate statistics
         classes_data = []
-        total_sessions = 0
-        total_attendance_percentage = 0
-        valid_classes_count = 0
+        total_completed_sessions_count = 0
+        total_attendance_sum = 0  # Sum of all attendance percentages
+        classes_with_sessions = 0  # Count of classes that have at least one completed session
 
         for assignment in assignments:
-            # Get subject details
             subject = assignment.subject
             
-            # Get all schedules for this assignment
-            schedules = Schedule.query.filter_by(assignment_id=assignment.id).all()
-            total_classes = len(schedules)
-            total_sessions += total_classes
-
-            if total_classes == 0:
-                # If no classes conducted yet, skip or set default values
-                attendance_percentage = 0
-                last_class_date = None
+            # Get ONLY completed schedules (status=True) for this assignment
+            completed_schedules = Schedule.query.filter_by(
+                assignment_id=assignment.id,
+                status=True
+            ).all()
+            
+            completed_sessions_count = len(completed_schedules)
+            
+            # Skip classes with no completed sessions
+            if completed_sessions_count == 0:
+                # Still include in response but with zero stats
+                class_data = {
+                    'assignmentId': assignment.id,
+                    'subjectCode': subject.subject_code,
+                    'subjectName': subject.subject_name,
+                    'subjectMnemonic': subject.subject_mnemonic,
+                    'section': assignment.section,
+                    'department': assignment.department,
+                    'year': assignment.year,
+                    'yearBatch': yearToBatch.get(assignment.year, 'Unknown'),
+                    'completedSessions': 0,
+                    'classAttendanceAvg': 0,
+                    'lastClassDate': None,
+                    'lastClassTopic': None
+                }
+                classes_data.append(class_data)
+                continue
+            
+            # Calculate attendance statistics for completed sessions
+            total_present_students = 0
+            total_students_across_sessions = 0
+            last_class_date = None
+            last_class_topic = None
+            
+            for schedule in completed_schedules:
+                # Get attendance records for this completed session
+                attendance_records = AttendanceRecord.query.filter_by(
+                    session_id=schedule.id
+                ).all()
+                
+                # Count present students (status=True means present)
+                present_count = sum(1 for record in attendance_records if record.status)
+                total_present_students += present_count
+                total_students_across_sessions += len(attendance_records)
+                
+                # Track the most recent class
+                if not last_class_date or schedule.date > last_class_date:
+                    last_class_date = schedule.date
+                    last_class_topic = schedule.topic_discussed
+            
+            # Calculate attendance percentage for this class
+            if total_students_across_sessions > 0:
+                class_attendance_avg = round(
+                    (total_present_students / total_students_across_sessions) * 100, 
+                    2
+                )
             else:
-                # Calculate attendance statistics
-                total_attendance_records = 0
-                total_possible_attendance = 0
-                last_class_date = None
-
-                for schedule in schedules:
-                    # Get attendance records for this session
-                    attendance_records = AttendanceRecord.query.filter_by(session_id=schedule.id).all()
-                    
-                    # Count present students
-                    present_count = sum(1 for record in attendance_records if record.status == True)
-                    total_attendance_records += present_count
-                    total_possible_attendance += len(attendance_records)
-                    
-                    # Track last class date
-                    if not last_class_date or schedule.date > last_class_date:
-                        last_class_date = schedule.date
-
-                # Calculate attendance percentage
-                if total_possible_attendance > 0:
-                    attendance_percentage = round((total_attendance_records / total_possible_attendance) * 100, 2)
-                else:
-                    attendance_percentage = 0
-
-                total_attendance_percentage += attendance_percentage
-                valid_classes_count += 1
-
-            # Format last class date
-            if last_class_date:
-                last_class_str = last_class_date.strftime('%d/%m/%Y')
-            else:
-                last_class_str = 'No classes yet'
-
+                class_attendance_avg = 0
+            
+            # Add to totals for overall calculation
+            if completed_sessions_count > 0:
+                total_attendance_sum += class_attendance_avg
+                classes_with_sessions += 1
+            
+            total_completed_sessions_count += completed_sessions_count
+            
+            # Prepare class data
             class_data = {
-                'id': str(assignment.id),
+                'assignmentId': assignment.id,
                 'subjectCode': subject.subject_code,
                 'subjectName': subject.subject_name,
+                'subjectMnemonic': subject.subject_mnemonic,
                 'section': assignment.section,
-                'totalClasses': total_classes,
-                'attendancePercentage': attendance_percentage,
-                'lastClass': last_class_str,
                 'department': assignment.department,
-                'year': f"E{assignment.year}" if assignment.year else 'Unknown',
-                'faculty': faculty.name
+                'year': assignment.year,
+                'yearBatch': yearToBatch.get(assignment.year, 'Unknown'),
+                'completedSessions': completed_sessions_count,
+                'classAttendanceAvg': class_attendance_avg,
+                'lastClassDate': last_class_date.strftime('%Y-%m-%d') if last_class_date else None,
+                'lastClassTopic': last_class_topic
             }
             
             classes_data.append(class_data)
-
-        # Calculate overall statistics
-        total_classes_count = len(assignments)
-        avg_attendance = round(total_attendance_percentage / valid_classes_count, 2) if valid_classes_count > 0 else 0
-        overall_avg = avg_attendance  # You can modify this if you want different calculation
-
+        
+        # Step 4: Calculate overall statistics
+        # overallAttendanceAvg = average of all class attendance averages
+        overall_attendance_avg = round(
+            total_attendance_sum / classes_with_sessions, 
+            2
+        ) if classes_with_sessions > 0 else 0
+        
+        # Step 5: Prepare response
         response_data = {
             'success': True,
             'faculty': {
@@ -962,17 +978,17 @@ def get_faculty_dashboard(faculty_id):
             },
             'classes': classes_data,
             'stats': {
-                'totalClasses': total_classes_count,
-                'totalSessions': total_sessions,
-                'avgAttendance': avg_attendance,
-                'overallAvg': overall_avg
+                'totalAssignments': len(assignments),
+                'totalCompletedSessions': total_completed_sessions_count,
+                'overallAttendanceAvg': overall_attendance_avg
             }
         }
 
-        return jsonify(response_data)
+        return jsonify(response_data), 200
 
     except Exception as e:
-        print(f"Error in get_faculty_dashboard: {str(e)}")
+        import traceback
+        traceback.print_exc()
         return jsonify({
             'success': False,
             'message': 'Internal server error',
@@ -991,7 +1007,7 @@ def get_class_attendance(assignment_id):
         offset = (page - 1) * limit
         
         # Get total count
-        total_sessions = Schedule.query.filter_by(assignment_id=assignment_id).count()
+        total_sessions = Schedule.query.filter_by(assignment_id=assignment_id, status=True).count()
         
         # Single optimized query with joins
         sessions = db.session.query(
@@ -1001,7 +1017,8 @@ def get_class_attendance(assignment_id):
         ).outerjoin(
             AttendanceRecord, Schedule.id == AttendanceRecord.session_id
         ).filter(
-            Schedule.assignment_id == assignment_id
+            Schedule.assignment_id == assignment_id,
+            Schedule.status == True  # Only completed sessions
         ).group_by(
             Schedule.id
         ).order_by(
@@ -1061,7 +1078,6 @@ def get_class_attendance(assignment_id):
         })
         
     except Exception as e:
-        print(f"Error in get_class_attendance: {str(e)}")
         return jsonify({
             'success': False,
             'message': 'Internal server error'
@@ -1125,7 +1141,6 @@ def update_attendance():
             
     except Exception as e:
         db.session.rollback()
-        print(f"Error in update_attendance: {str(e)}")
         return jsonify({
             'success': False,
             'message': 'Internal server error'
@@ -1257,7 +1272,6 @@ def get_attendance_report(assignment_id):
         })
 
     except Exception as e:
-        print(f"Error in get_attendance_report: {str(e)}")
         return jsonify({
             'success': False,
             'message': 'Internal server error'
@@ -1287,7 +1301,6 @@ def start_daily_scheduler(app):
    
     # Start the scheduler
     scheduler.start()
-    print("✅ Daily scheduler started - will run at 17:58 every day")
 
     
     # Proper shutdown when app stops
@@ -1306,8 +1319,6 @@ def move_tomorrow_schedules_auto(app):
             # Use TOMORROW's date instead of today
             target_date = date.today()  + timedelta(days=1)
             day_name = target_date.strftime('%a').upper()
-            
-            print(f"🤖 AUTO: Moving schedules for TOMORROW - {day_name} ({target_date})")
             
             # Get all default schedules for that day
             default_schedules = DefaultSchedule.query\
@@ -1342,11 +1353,8 @@ def move_tomorrow_schedules_auto(app):
             
             db.session.commit()
             
-            print(f"✅ AUTO: Created {created_count} schedules for {day_name}, skipped {skipped_count}")
-            
         except Exception as e:
             db.session.rollback()
-            print(f"❌ AUTO: Error moving schedules: {str(e)}")
 
 @routes.route('/time', methods=['GET'])
 def get_server_time():
@@ -1363,7 +1371,6 @@ def get_server_time():
             'timezone': 'Asia/Kolkata'
         }), 200
     except Exception as e:
-        print(f"Error fetching server time: {str(e)}")
         return jsonify({'success': False, 'error': 'Failed to fetch server time'}), 500
     
 
@@ -1391,9 +1398,8 @@ def generate_otp():
     if not assignment or assignment.faculty_id != faculty_id:
         return jsonify({'success': False, 'message': 'Faculty not authorized for this schedule'}), 403
 
-    # Store OTP with creation timestamp, topic_discussed, and mark attendance as completed
+    # Store OTP (without timestamp yet), topic_discussed, and mark attendance as completed
     schedule.otp = otp
-    schedule.otp_created_at = datetime.utcnow()  # Store UTC timestamp when OTP is created
     schedule.status = True
     schedule.topic_discussed = topic_discussed.strip()
     
@@ -1405,11 +1411,6 @@ def generate_otp():
             department=assignment.department,  # Changed from 'dept'
             section=assignment.section          # Changed from 'branch'
         ).all()
-        
-        print(f"🎯 Found {len(students)} students for:")
-        print(f"   Year: {assignment.year}")
-        print(f"   Department: {assignment.department}")
-        print(f"   Section: {assignment.section}")
         
         # Create attendance records with status=False (absent by default)
         for student in students:
@@ -1426,20 +1427,17 @@ def generate_otp():
                     status=False  # Default to absent, will be updated when they submit OTP
                 )
                 db.session.add(attendance_record)
-                print(f"📝 Created attendance record for student {student.id} - Status: False")
-            else:
-                print(f"ℹ️ Attendance record already exists for student {student.id}")
         
         db.session.commit()
-        print(f"✅ Created/updated {len(students)} attendance records for schedule {schedule_id}")
+        
+        # ⏰ CRITICAL: Set OTP timestamp AFTER all database operations are complete
+        # This ensures the 45-second countdown starts from when data is ready, not when OTP generation started
+        schedule.otp_created_at = datetime.now(timezone.utc)
+        db.session.commit()
         
     except Exception as e:
         db.session.rollback()
-        print(f"❌ Error creating attendance records: {str(e)}")
         return jsonify({'success': False, 'message': f'Error creating attendance records: {str(e)}'}), 500
-
-    print(f"📝 Attendance marked with topic_discussed: {topic_discussed.strip()}")
-    print(f"⏰ OTP created at: {schedule.otp_created_at.isoformat()}")
 
     # Schedule OTP removal after 45 seconds
     run_date = datetime.now() + timedelta(seconds=45)
@@ -1452,8 +1450,6 @@ def generate_otp():
         name=f'Remove OTP for schedule {schedule_id}'
     )
 
-    print(f"⏰ OTP removal scheduled for schedule {schedule_id} at {run_date}")
-    
     return jsonify({
         'success': True, 
         'otp': otp, 
@@ -1478,12 +1474,9 @@ def remove_otp_job(schedule_id):
                 schedule.otp = ""
                 schedule.otp_created_at = None  # Clear timestamp when OTP is removed
                 db.session.commit()
-                print(f"✅ OTP cleared for schedule {schedule_id}")
-            else:
-                print(f"❌ Schedule {schedule_id} not found during OTP removal")
                 
     except Exception as e:
-        print(f"❌ Error removing OTP for schedule {schedule_id}: {str(e)}")
+        pass
 
 @routes.route('/api/student/schedule', methods=['GET'])
 def get_student_schedule():
@@ -1854,7 +1847,6 @@ def update_venue():
         
     except Exception as e:
         db.session.rollback()
-        print(f"Error updating venue: {str(e)}")
         return jsonify({'success': False, 'error': str(e)}), 500
 
 
@@ -1902,7 +1894,6 @@ def verify_otp():
         })
 
     except Exception as error:
-        print(f"OTP verification error: {error}")
         return jsonify({
             'success': False,
             'message': 'Internal server error'
@@ -1926,8 +1917,6 @@ def mark_attendance():
         # Extract student ID from email
         student_id = email.split('@')[0].upper()
         
-        print(f"🎯 Marking attendance for student: {student_id}, session: {session_id}")
-        
         # Check if attendance record exists
         attendance_record = AttendanceRecord.query.filter_by(
             student_id=student_id, 
@@ -1935,14 +1924,10 @@ def mark_attendance():
         ).first()
         
         if not attendance_record:
-            print(f"❌ No attendance record found for {student_id} in session {session_id}")
             return jsonify({'error': 'Attendance record not found for this session'}), 404
-        
-        print(f"📊 Found record - Current status: {attendance_record.status}")
         
         # Check if already marked present
         if attendance_record.status:
-            print(f"ℹ️ Attendance already marked for {student_id} in session {session_id}")
             return jsonify({
                 'error': 'Attendance already marked for this session',
                 'already_marked': True
@@ -1951,8 +1936,6 @@ def mark_attendance():
         # Update from False to True
         attendance_record.status = True
         db.session.commit()
-        
-        print(f"✅ Successfully updated attendance for {student_id} from absent to present")
         
         return jsonify({
             'success': True,
@@ -1964,7 +1947,6 @@ def mark_attendance():
         
     except Exception as e:
         db.session.rollback()
-        print(f"❌ Error marking attendance: {str(e)}")
         return jsonify({'error': f'Failed to mark attendance: {str(e)}'}), 500
 
 
@@ -2052,7 +2034,6 @@ def get_student_attendance(student_id):
         }), 200
 
     except Exception as e:
-        print(f"Error fetching attendance for student {student_id}: {str(e)}")
         return jsonify({'success': False, 'error': 'Failed to fetch attendance'}), 500
 
 @routes.route('/student/profile/<student_id>', methods=['GET'])
@@ -2079,7 +2060,6 @@ def get_student_profile(student_id):
         }), 200
         
     except Exception as e:
-        print(f"Error fetching student profile for {student_id}: {str(e)}")
         return jsonify({
             'success': False,
             'error': 'Failed to fetch student profile'
@@ -2168,7 +2148,6 @@ def get_student_history(student_id):
         }), 200
         
     except Exception as e:
-        print(f"Error fetching history for student {student_id}: {str(e)}")
         return jsonify({'success': False, 'error': 'Failed to fetch student history'}), 500
 
 #To clean the schedules automatically for every 100 days at 5:00PM
@@ -2182,11 +2161,8 @@ def cleanup_old_schedules(app):
             deleted_count = Schedule.query.filter(Schedule.date < cutoff_date).delete()
             db.session.commit()
             
-            print(f"🧹 CLEANUP: Deleted {deleted_count} schedules older than {cutoff_date}")
-            
         except Exception as e:
             db.session.rollback()
-            print(f"❌ CLEANUP: Error deleting old schedules: {str(e)}")
 
 # Helper function to convert 24hr to 12hr format
 def format_time_12hr(time_str):
@@ -2208,15 +2184,12 @@ def cleanup_expired_schedules():
         
         with app.app_context():
             current_time = datetime.now()
-            print(f"🕒 Cleanup running at: {current_time}")
             
             # Get all schedules with status=False and no OTP
             potential_schedules = Schedule.query.filter(
                 Schedule.status == False,
                 db.or_(Schedule.otp == "", Schedule.otp.is_(None))
             ).all()
-            
-            print(f"🔍 Found {len(potential_schedules)} schedules with status=False and no OTP")
             
             deleted_count = 0
             for schedule in potential_schedules:
@@ -2231,19 +2204,11 @@ def cleanup_expired_schedules():
                 if current_time > schedule_expiry_time:
                     db.session.delete(schedule)
                     deleted_count += 1
-                    print(f"🗑️ Deleted schedule {schedule.id} - "
-                          f"Ended: {schedule_end_datetime.strftime('%Y-%m-%d %H:%M')}, "
-                          f"Expired: {schedule_expiry_time.strftime('%Y-%m-%d %H:%M')}")
-                else:
-                    print(f"⏳ Schedule {schedule.id} still valid - "
-                          f"Ends: {schedule_end_datetime.strftime('%Y-%m-%d %H:%M')}, "
-                          f"Expires: {schedule_expiry_time.strftime('%Y-%m-%d %H:%M')}")
             
             db.session.commit()
-            print(f"✅ Auto-cleanup: Deleted {deleted_count} expired schedules")
             
     except Exception as e:
-        print(f"❌ Error in auto-cleanup: {str(e)}")
+        pass
 
 # Add this to your scheduler
 def start_cleanup_scheduler(app):
@@ -2258,8 +2223,6 @@ def start_cleanup_scheduler(app):
         id='cleanup_expired_schedules',
         name='Clean up expired schedules every 5 minutes'
     )
-    
-    print("✅ Cleanup scheduler started - will run every 5 minutes")
 
 
 
@@ -2330,7 +2293,6 @@ def register_fcm_token():
         
     except Exception as e:
         db.session.rollback()
-        print(f"Error registering FCM token: {str(e)}")
         return jsonify({
             'success': False,
             'error': str(e)
@@ -2396,7 +2358,6 @@ def remove_fcm_token():
         
     except Exception as e:
         db.session.rollback()
-        print(f"Error removing FCM token: {str(e)}")
         return jsonify({
             'success': False,
             'error': str(e)
@@ -2548,7 +2509,6 @@ def send_class_notification():
                 'error': 'Firebase Admin SDK not installed. Please install: pip install firebase-admin'
             }), 500
         except Exception as fcm_error:
-            print(f"FCM Error: {str(fcm_error)}")
             return jsonify({
                 'success': False,
                 'error': f'Failed to send notification: {str(fcm_error)}'
@@ -2556,7 +2516,6 @@ def send_class_notification():
         
     except Exception as e:
         db.session.rollback()
-        print(f"Error sending notification: {str(e)}")
         return jsonify({
             'success': False,
             'error': str(e)
@@ -2606,10 +2565,146 @@ def get_notification_history():
         }), 200
         
     except Exception as e:
-        print(f"Error fetching notification history: {str(e)}")
         return jsonify({
             'success': False,
             'error': str(e)
         }), 500
 
 
+# ============================================================================
+# DEVICE BINDING ENDPOINTS
+# ============================================================================
+
+@routes.route('/student/device-binding/<string:student_id>', methods=['GET'])
+def get_device_binding(student_id):
+    """
+    Get the stored binding_id for a student
+    
+    Returns:
+        200: { "success": true, "binding_id": "bind_xxx" } or { "success": true, "binding_id": null }
+        404: { "success": false, "message": "Student not found" }
+        500: { "success": false, "message": "Server error" }
+    """
+    try:
+        # Query database for student
+        student = Student.query.filter_by(id=student_id).first()
+        
+        # Check if student exists
+        if not student:
+            return jsonify({
+                'success': False,
+                'message': 'Student not found'
+            }), 404
+        
+        # Return binding_id (can be None/null)
+        return jsonify({
+            'success': True,
+            'binding_id': student.binding_id
+        }), 200
+        
+    except Exception as e:
+        return jsonify({
+            'success': False,
+            'message': 'Server error'
+        }), 500
+
+
+@routes.route('/student/bind-device/<string:student_id>', methods=['POST'])
+def bind_device(student_id):
+    """
+    Save/update the binding_id for a student (used on first login)
+    
+    Request Body:
+        { "binding_id": "bind_a3f5c89d_1696854321000" }
+    
+    Returns:
+        200: { "success": true, "message": "Device bound successfully" }
+        400: { "success": false, "message": "binding_id is required" }
+        404: { "success": false, "message": "Student not found" }
+        500: { "success": false, "message": "Server error" }
+    """
+    try:
+        # Get binding_id from request body
+        data = request.get_json()
+        
+        if not data or 'binding_id' not in data:
+            return jsonify({
+                'success': False,
+                'message': 'binding_id is required'
+            }), 400
+        
+        binding_id = data['binding_id']
+        
+        if not binding_id:
+            return jsonify({
+                'success': False,
+                'message': 'binding_id is required'
+            }), 400
+        
+        # Check if student exists
+        student = Student.query.filter_by(id=student_id).first()
+        
+        if not student:
+            return jsonify({
+                'success': False,
+                'message': 'Student not found'
+            }), 404
+        
+        # Update binding_id
+        student.binding_id = binding_id
+        db.session.commit()
+        
+        return jsonify({
+            'success': True,
+            'message': 'Device bound successfully'
+        }), 200
+        
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({
+            'success': False,
+            'message': str(e)
+        }), 500
+
+
+@routes.route('/admin/reset-device-binding/<string:student_id>', methods=['POST'])
+def reset_device_binding(student_id):
+    """
+    Admin endpoint to reset a student's device binding (sets binding_id to NULL)
+    
+    Note: In production, add authentication middleware to verify admin access
+    
+    Returns:
+        200: { "success": true, "message": "Device binding reset successfully" }
+        404: { "success": false, "message": "Student not found" }
+        500: { "success": false, "message": "Server error" }
+    """
+    try:
+        # TODO: Add admin authentication check here
+        # Example: verify JWT token, check if user has admin role, etc.
+        
+        # Find student
+        student = Student.query.filter_by(id=student_id).first()
+        
+        if not student:
+            return jsonify({
+                'success': False,
+                'message': 'Student not found'
+            }), 404
+        
+        # Reset binding_id to NULL
+        old_binding = student.binding_id
+        student.binding_id = None
+        db.session.commit()
+        
+        return jsonify({
+            'success': True,
+            'message': 'Device binding reset successfully'
+        }), 200
+        
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({
+            'success': False,
+            'message': 'Server error'
+        }), 500

@@ -7,7 +7,7 @@ class Student(db.Model):
     year = db.Column(db.Integer, nullable=False, index=True)
     department = db.Column(db.String(50), nullable=False, index=True)
     section = db.Column(db.String(10), nullable=False, index=True)
-    binding_id = db.Column(db.String(200))
+    binding_id = db.Column(db.String(200), unique=True, index=True)
 
 
 class Faculty(db.Model):
