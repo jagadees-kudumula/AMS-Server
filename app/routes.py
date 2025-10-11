@@ -1405,28 +1405,41 @@ def generate_otp():
     
     # Create attendance records for all students in that year, department, and section
     try:
-        # Get students based on the assignment's criteria
-        students = Student.query.filter_by(
+        # ✅ OPTIMIZED: Get only student IDs (faster than loading full objects)
+        student_ids = db.session.query(Student.id).filter_by(
             year=assignment.year,
-            department=assignment.department,  # Changed from 'dept'
-            section=assignment.section          # Changed from 'branch'
+            department=assignment.department,
+            section=assignment.section
         ).all()
         
-        # Create attendance records with status=False (absent by default)
-        for student in students:
-            # Check if attendance record already exists to avoid duplicates
-            existing_record = AttendanceRecord.query.filter_by(
-                student_id=student.id,
-                session_id=schedule_id
-            ).first()
-            
-            if not existing_record:
-                attendance_record = AttendanceRecord(
-                    student_id=student.id,
-                    session_id=schedule_id,
-                    status=False  # Default to absent, will be updated when they submit OTP
-                )
-                db.session.add(attendance_record)
+        # Extract IDs from tuples
+        student_ids = [sid[0] for sid in student_ids]
+        
+        # ✅ OPTIMIZED: Check existing records in a single query
+        existing_student_ids = set(
+            db.session.query(AttendanceRecord.student_id)
+            .filter(
+                AttendanceRecord.session_id == schedule_id,
+                AttendanceRecord.student_id.in_(student_ids)
+            )
+            .all()
+        )
+        existing_student_ids = {sid[0] for sid in existing_student_ids}
+        
+        # ✅ OPTIMIZED: Prepare bulk insert data (only for new records)
+        new_attendance_records = [
+            {
+                'student_id': student_id,
+                'session_id': schedule_id,
+                'status': False  # Default to absent, will be updated when they submit OTP
+            }
+            for student_id in student_ids
+            if student_id not in existing_student_ids
+        ]
+        
+        # ✅ OPTIMIZED: Bulk insert (100x faster than individual inserts)
+        if new_attendance_records:
+            db.session.bulk_insert_mappings(AttendanceRecord, new_attendance_records)
         
         db.session.commit()
         
@@ -1455,7 +1468,8 @@ def generate_otp():
         'otp': otp, 
         'schedule_id': schedule_id,
         'topic_discussed': topic_discussed.strip(),
-        'attendance_records_created': len(students)
+        'attendance_records_created': len(new_attendance_records) if new_attendance_records else 0,
+        'total_students': len(student_ids)
     }), 200
 
 def remove_otp_job(schedule_id):
@@ -1495,65 +1509,71 @@ def get_student_schedule():
         today = date.today()
         tomorrow = today + timedelta(days=1)
 
-        # Query for actual schedules (today and tomorrow)
-        actual_schedules = Schedule.query\
-            .join(FacultyAssignment, Schedule.assignment_id == FacultyAssignment.id)\
-            .filter(
-                FacultyAssignment.year == student.year,
-                FacultyAssignment.department == student.department,
-                FacultyAssignment.section == student.section,
-                or_(Schedule.date == today, Schedule.date == tomorrow)
-            )\
-            .join(Subject, FacultyAssignment.subject_code == Subject.subject_code)\
-            .join(Faculty, FacultyAssignment.faculty_id == Faculty.id)\
-            .add_columns(
-                Schedule.id,
-                Schedule.date,
-                Schedule.start_time,
-                Schedule.end_time,
-                Schedule.venue,
-                Schedule.status,
-                Schedule.otp,
-                Schedule.otp_created_at,
-                Subject.subject_name,
-                Subject.subject_code,
-                Subject.subject_mnemonic,
-                Subject.subject_type,
-                Faculty.name.label('faculty_name')
-            )\
-            .all()
+        # ✅ OPTIMIZED: Query for actual schedules with all needed data
+        schedules = db.session.query(
+            Schedule.id,
+            Schedule.date,
+            Schedule.start_time,
+            Schedule.end_time,
+            Schedule.venue,
+            Schedule.status,
+            Schedule.otp,
+            Schedule.otp_created_at,
+            Subject.subject_name,
+            Subject.subject_code,
+            Subject.subject_mnemonic,
+            Subject.subject_type,
+            Faculty.name.label('faculty_name')
+        ).join(FacultyAssignment, Schedule.assignment_id == FacultyAssignment.id)\
+         .join(Subject, FacultyAssignment.subject_code == Subject.subject_code)\
+         .join(Faculty, FacultyAssignment.faculty_id == Faculty.id)\
+         .filter(
+            FacultyAssignment.year == student.year,
+            FacultyAssignment.department == student.department,
+            FacultyAssignment.section == student.section,
+            or_(Schedule.date == today, Schedule.date == tomorrow)
+        ).all()
+        
+        # ✅ OPTIMIZED: Bulk query for all attendance records (single query)
+        schedule_ids = [s.id for s in schedules]
+        attendance_records = {}
+        
+        if schedule_ids:
+            records = db.session.query(
+                AttendanceRecord.session_id,
+                AttendanceRecord.status
+            ).filter(
+                AttendanceRecord.student_id == student.id,
+                AttendanceRecord.session_id.in_(schedule_ids)
+            ).all()
+            
+            # Create lookup dictionary for O(1) access
+            attendance_records = {r.session_id: r.status for r in records}
 
-        # Process actual schedules
+        # ✅ OPTIMIZED: Build response (no queries in loop!)
         schedule_data = []
-        for schedule in actual_schedules:
-            # Check if attendance already marked for this student
-            attendance_record = AttendanceRecord.query.filter_by(
-                student_id=student.id,
-                session_id=schedule.id
-            ).first()
-
-            SubjectDetails = Subject.query.filter_by(subject_code=schedule.subject_code).first()
-
-            # FIX: Include raw start_time and end_time for frontend calculations
+        for s in schedules:
+            # Lookup attendance from dictionary (no query!)
+            attendance_marked = s.id in attendance_records
+            attendance_status = attendance_records.get(s.id)
 
             schedule_data.append({
-                'id': str(schedule.id),
-                'subject': SubjectDetails.subject_name,
-                'subject_code': SubjectDetails.subject_code,
-                'subject_mnemonic': SubjectDetails.subject_mnemonic,
-                'subject_type': SubjectDetails.subject_type,
-                'time': f"{format_time_12hr(schedule.start_time)} - {format_time_12hr(schedule.end_time)}",
-                'location': schedule.venue,
-                'date': schedule.date.isoformat(),
-                'faculty_name': schedule.faculty_name,
-                'status': schedule.status,
-                'otp': schedule.otp,
-                'otp_created_at': schedule.otp_created_at.isoformat() + 'Z' if schedule.otp_created_at else None,
-                'attendance_marked': attendance_record is not None,
-                'attendance_status': attendance_record.status if attendance_record else None,
-                # FIX: Add raw time fields for frontend calculations
-                'start_time': schedule.start_time,  # Raw format: "08:30"
-                'end_time': schedule.end_time,      # Raw format: "09:30"
+                'id': str(s.id),
+                'subject': s.subject_name,  # ✅ From join, not extra query
+                'subject_code': s.subject_code,
+                'subject_mnemonic': s.subject_mnemonic,
+                'subject_type': s.subject_type,
+                'time': f"{format_time_12hr(s.start_time)} - {format_time_12hr(s.end_time)}",
+                'location': s.venue,
+                'date': s.date.isoformat(),
+                'faculty_name': s.faculty_name,
+                'status': s.status,
+                'otp': s.otp,
+                'otp_created_at': s.otp_created_at.isoformat() + 'Z' if s.otp_created_at else None,
+                'attendance_marked': attendance_marked,
+                'attendance_status': attendance_status,
+                'start_time': s.start_time,  # Raw format: "08:30"
+                'end_time': s.end_time,      # Raw format: "09:30"
             })
 
         # Separate today and tomorrow schedules

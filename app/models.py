@@ -29,7 +29,7 @@ class Subject(db.Model):
 # 🔑 New Table: Faculty teaches what and to whom
 class FacultyAssignment(db.Model):
     id = db.Column(db.Integer, primary_key=True)
-    faculty_id = db.Column(db.String(20), db.ForeignKey('faculty.id'), nullable=False)
+    faculty_id = db.Column(db.String(20), db.ForeignKey('faculty.id'), nullable=False, index=True)
     subject_code = db.Column(db.String(10), db.ForeignKey('subject.subject_code', ondelete='CASCADE'), nullable=False, index=True)
     year = db.Column(db.Integer, nullable=False, index=True)
     department = db.Column(db.String(50), nullable=False, index=True)
@@ -42,10 +42,10 @@ class FacultyAssignment(db.Model):
 class Schedule(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     assignment_id = db.Column(db.Integer, db.ForeignKey('faculty_assignment.id', ondelete='CASCADE'), nullable=False, index=True)
-    date = db.Column(db.Date, nullable=False)
+    date = db.Column(db.Date, nullable=False, index=True)
     start_time = db.Column(db.String(5), nullable=False)
     end_time = db.Column(db.String(5), nullable=False)
-    status = db.Column(db.Boolean, default=False)
+    status = db.Column(db.Boolean, default=False, index=True)
     venue = db.Column(db.String(50))
     otp=db.Column(db.String(6) ,nullable=True)
     otp_created_at = db.Column(db.DateTime, nullable=True)
