@@ -8,7 +8,8 @@ from datetime import datetime, date, timedelta, timezone
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 import atexit
-from sqlalchemy import or_,not_
+from sqlalchemy import or_,not_, func
+from sqlalchemy.orm import joinedload, contains_eager
 from threading import Timer
 import time
 
@@ -66,21 +67,21 @@ def upload_students():
 @routes.route('/crs', methods=['GET', 'POST'])
 def handle_crs():
     if request.method == 'GET':
-        # Get all CRs with student details
+        # Get all CRs with student details using JOIN to avoid N+1 queries
         try:
-            crs = CR.query.all()
+            # Use joinedload to eagerly load student data
+            crs = CR.query.options(joinedload(CR.student)).all()
             cr_data = []
             
             for cr in crs:
-                student = Student.query.get(cr.student_id)
-                if student:
+                if cr.student:  # student is already loaded via joinedload
                     cr_data.append({
                         'id': cr.student_id,
-                        'name': student.name,
-                        'email': student.email,
-                        'year': student.year,
-                        'branch': student.department,
-                        'section': student.section,
+                        'name': cr.student.name,
+                        'email': cr.student.email,
+                        'year': cr.student.year,
+                        'branch': cr.student.department,
+                        'section': cr.student.section,
                         'phone': cr.mobile  # Include mobile from CR table
                     })
             
@@ -157,8 +158,10 @@ def add_cr():
 @routes.route('/faculties', methods=['GET'])
 def get_faculties():
     try:
-        
-        faculty_assignments = FacultyAssignment.query.all()
+        # Use joinedload to eagerly load faculty data, avoiding N+1 queries
+        faculty_assignments = FacultyAssignment.query.options(
+            joinedload(FacultyAssignment.faculty)
+        ).all()
         faculty_list = []
 
         for fa in faculty_assignments:
@@ -167,16 +170,11 @@ def get_faculties():
                 'year': fa.year,
                 'department': fa.department,
                 'section': fa.section,
-                'assignment_id': fa.id
-            }
-
-            faculty = Faculty.query.get(fa.faculty_id)
-
-            faculty_details.update({
-                'id': faculty.id,
-                'name': faculty.name,
-                'email': faculty.email
-            })     
+                'assignment_id': fa.id,
+                'id': fa.faculty.id,
+                'name': fa.faculty.name,
+                'email': fa.faculty.email
+            }     
         
             faculty_list.append(faculty_details)
     
@@ -848,8 +846,10 @@ def get_faculty_dashboard(faculty_id):
                 'message': 'Faculty not found'
             }), 404
 
-        # Step 2: Get all class assignments for this faculty
-        assignments = FacultyAssignment.query.filter_by(faculty_id=faculty_id).all()
+        # Step 2: Get all class assignments with subjects eagerly loaded
+        assignments = FacultyAssignment.query.options(
+            joinedload(FacultyAssignment.subject)
+        ).filter_by(faculty_id=faculty_id).all()
         
         if not assignments:
             return jsonify({
@@ -868,24 +868,50 @@ def get_faculty_dashboard(faculty_id):
                 }
             })
 
-        # Step 3: Process each assignment and calculate statistics
+        # Step 3: Get all assignment IDs for batch querying
+        assignment_ids = [a.id for a in assignments]
+        
+        # Step 4: Batch query all completed schedules for all assignments
+        # Use subquery to get attendance stats efficiently
+        attendance_stats = db.session.query(
+            Schedule.assignment_id,
+            Schedule.id.label('schedule_id'),
+            Schedule.date,
+            Schedule.topic_discussed,
+            func.count(AttendanceRecord.id).label('total_students'),
+            func.sum(func.cast(AttendanceRecord.status, db.Integer)).label('present_students')
+        ).outerjoin(
+            AttendanceRecord, Schedule.id == AttendanceRecord.session_id
+        ).filter(
+            Schedule.assignment_id.in_(assignment_ids),
+            Schedule.status == True
+        ).group_by(
+            Schedule.assignment_id,
+            Schedule.id,
+            Schedule.date,
+            Schedule.topic_discussed
+        ).all()
+        
+        # Organize stats by assignment_id
+        assignment_stats_map = {}
+        for stat in attendance_stats:
+            if stat.assignment_id not in assignment_stats_map:
+                assignment_stats_map[stat.assignment_id] = []
+            assignment_stats_map[stat.assignment_id].append(stat)
+
+        # Step 5: Process each assignment and calculate statistics
         classes_data = []
         total_completed_sessions_count = 0
-        total_attendance_sum = 0  # Sum of all attendance percentages
-        classes_with_sessions = 0  # Count of classes that have at least one completed session
+        total_attendance_sum = 0
+        classes_with_sessions = 0
 
         for assignment in assignments:
-            subject = assignment.subject
+            subject = assignment.subject  # Already loaded via joinedload
             
-            # Get ONLY completed schedules (status=True) for this assignment
-            completed_schedules = Schedule.query.filter_by(
-                assignment_id=assignment.id,
-                status=True
-            ).all()
+            # Get stats for this assignment
+            assignment_schedule_stats = assignment_stats_map.get(assignment.id, [])
+            completed_sessions_count = len(assignment_schedule_stats)
             
-            completed_sessions_count = len(completed_schedules)
-            
-            # Skip classes with no completed sessions
             if completed_sessions_count == 0:
                 # Still include in response but with zero stats
                 class_data = {
@@ -905,27 +931,23 @@ def get_faculty_dashboard(faculty_id):
                 classes_data.append(class_data)
                 continue
             
-            # Calculate attendance statistics for completed sessions
+            # Calculate attendance statistics from batch-loaded data
             total_present_students = 0
             total_students_across_sessions = 0
             last_class_date = None
             last_class_topic = None
             
-            for schedule in completed_schedules:
-                # Get attendance records for this completed session
-                attendance_records = AttendanceRecord.query.filter_by(
-                    session_id=schedule.id
-                ).all()
+            for stat in assignment_schedule_stats:
+                present_count = stat.present_students or 0
+                total_count = stat.total_students or 0
                 
-                # Count present students (status=True means present)
-                present_count = sum(1 for record in attendance_records if record.status)
                 total_present_students += present_count
-                total_students_across_sessions += len(attendance_records)
+                total_students_across_sessions += total_count
                 
                 # Track the most recent class
-                if not last_class_date or schedule.date > last_class_date:
-                    last_class_date = schedule.date
-                    last_class_topic = schedule.topic_discussed
+                if not last_class_date or stat.date > last_class_date:
+                    last_class_date = stat.date
+                    last_class_topic = stat.topic_discussed
             
             # Calculate attendance percentage for this class
             if total_students_across_sessions > 0:
@@ -961,14 +983,13 @@ def get_faculty_dashboard(faculty_id):
             
             classes_data.append(class_data)
         
-        # Step 4: Calculate overall statistics
-        # overallAttendanceAvg = average of all class attendance averages
+        # Step 6: Calculate overall statistics
         overall_attendance_avg = round(
             total_attendance_sum / classes_with_sessions, 
             2
         ) if classes_with_sessions > 0 else 0
         
-        # Step 5: Prepare response
+        # Step 7: Prepare response
         response_data = {
             'success': True,
             'faculty': {
@@ -1660,8 +1681,11 @@ def get_cr_subjects():
         if not cr_record:
             return jsonify({'error': 'Only CR can access this endpoint'}), 403
 
-        # Get subjects assigned to this class from FacultyAssignment
-        assignments = FacultyAssignment.query.filter_by(
+        # Get subjects assigned to this class with eager loading of related data
+        assignments = FacultyAssignment.query.options(
+            joinedload(FacultyAssignment.subject),
+            joinedload(FacultyAssignment.faculty)
+        ).filter_by(
             year=student.year,
             department=student.department,
             section=student.section
