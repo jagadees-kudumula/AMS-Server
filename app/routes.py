@@ -1559,7 +1559,7 @@ def generate_otp():
         return jsonify({'success': False, 'message': f'Error creating attendance records: {str(e)}'}), 500
 
     # Schedule OTP removal after 45 seconds
-    run_date = datetime.now() + timedelta(seconds=65)
+    run_date = datetime.now() + timedelta(seconds=45)
     scheduler.add_job(
         func=remove_otp_job,
         trigger='date',
