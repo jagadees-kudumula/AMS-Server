@@ -43,20 +43,22 @@ def upload_students():
         # Read Excel into a DataFrame
         df = pd.read_excel(file)
 
-        # Expected columns: id, name, email, year, department, section
-
-        for index, row in df.iterrows():
-            student = Student(
+        # Prepare bulk insert list
+        students_to_add = []
+        for _, row in df.iterrows():
+            students_to_add.append(Student(
                 id=row['id'],
                 name=row['name'],
                 email=row['id'].lower() + "@rguktrkv.ac.in",
                 year=year,
                 department=department,
                 section=row['section']
-            )
-            db.session.add(student)
+            ))
         
-
+        # Bulk insert all students
+        if students_to_add:
+            db.session.bulk_save_objects(students_to_add)
+        
         db.session.commit()
         return jsonify({'success':True,'message': f'{len(df)} students added successfully.'})
 
@@ -192,7 +194,40 @@ def upload_faculty():
     try:
         df = pd.read_excel(file)
         
-        for index,row in df.iterrows():
+        # Batch fetch all existing faculties and assignments in one query
+        faculty_ids = df['FacultyId'].unique().tolist()
+        existing_faculties = {f.id: f for f in Faculty.query.filter(Faculty.id.in_(faculty_ids)).all()}
+        
+        # Build assignment tuples for checking duplicates
+        assignment_keys = []
+        for _, row in df.iterrows():
+            year = batchToYear[row['Year']]
+            assignment_keys.append((
+                row['FacultyId'],
+                row['SubjectCode'],
+                year,
+                row['Department'],
+                row['Section']
+            ))
+        
+        # Fetch existing assignments in bulk
+        existing_assignments_query = db.session.query(
+            FacultyAssignment.faculty_id,
+            FacultyAssignment.subject_code,
+            FacultyAssignment.year,
+            FacultyAssignment.department,
+            FacultyAssignment.section
+        ).filter(
+            FacultyAssignment.faculty_id.in_(faculty_ids)
+        ).all()
+        
+        existing_assignments_set = set(existing_assignments_query)
+        
+        # Prepare bulk insert lists
+        faculties_to_add = []
+        assignments_to_add = []
+        
+        for _, row in df.iterrows():
             faculty_id = row['FacultyId']
             faculty_name = row['FacultyName']
             subject_code = row['SubjectCode']
@@ -200,37 +235,36 @@ def upload_faculty():
             year = batchToYear[row['Year']]
             section = row['Section']
             
-            faculty = Faculty.query.filter_by(id=faculty_id).first()
-
-            if not faculty:
+            # Check if faculty needs to be created
+            if faculty_id not in existing_faculties:
                 email = f"{faculty_id}@rguktrkv.ac.in"
-                faculty = Faculty(
+                faculties_to_add.append(Faculty(
                     id=faculty_id,
                     name=faculty_name,
                     email=email
-                )
-                db.session.add(faculty)
+                ))
+                existing_faculties[faculty_id] = True  # Mark as added
             
-            existing_assignment = FacultyAssignment.query.filter_by(
-                    faculty_id=faculty_id,
-                    subject_code=subject_code,
-                    year=year,
-                    department=department,
-                    section=section
-                ).first()
-            
-            if existing_assignment:
+            # Check for duplicate assignment
+            assignment_tuple = (faculty_id, subject_code, year, department, section)
+            if assignment_tuple in existing_assignments_set:
                 return jsonify({'success': False, 'message': 'The assignment already exists'}), 201
             
-            faculty_assignment = FacultyAssignment(
+            # Add to bulk insert list
+            assignments_to_add.append(FacultyAssignment(
                 faculty_id=faculty_id,
                 subject_code=subject_code,
                 year=year,
                 department=department,
                 section=section
-            )
-
-            db.session.add(faculty_assignment)
+            ))
+            existing_assignments_set.add(assignment_tuple)
+        
+        # Bulk insert all faculties and assignments
+        if faculties_to_add:
+            db.session.bulk_save_objects(faculties_to_add)
+        if assignments_to_add:
+            db.session.bulk_save_objects(assignments_to_add)
 
         db.session.commit()
         return jsonify({'success': True, 'message': 'Successfully processed faculty assignments'})
@@ -479,17 +513,16 @@ def upload_default_schedules():
     department = request.form['department']
     isreplace = request.form['replace']
 
-     # 3. Handle Replace Flag (Clear existing schedules for this group)
+    # Handle Replace Flag (Clear existing schedules for this group)
     if isreplace == 'true':
         try:
-            # 1. Find all FacultyAssignment IDs (assignment_id) matching the year and department.
+            # Find all FacultyAssignment IDs matching the year and department
             assignment_ids_to_clear = db.session.query(FacultyAssignment.id).filter(
                 FacultyAssignment.year == year,
                 FacultyAssignment.department == department
             ).subquery()
             
-            # 2. Delete the corresponding DefaultSchedule records using the found IDs.
-            # This is the corrected and safe delete operation.
+            # Delete the corresponding DefaultSchedule records using the found IDs
             db.session.query(DefaultSchedule).filter(
                 DefaultSchedule.assignment_id.in_(assignment_ids_to_clear.select())
             ).delete(synchronize_session='fetch')
@@ -502,8 +535,42 @@ def upload_default_schedules():
     try:
         df = pd.read_excel(file)
 
-        for index, row in df.iterrows():
+        # Fetch all subject types in one query
+        subject_codes = df['SubjectCode'].unique().tolist()
+        subject_types_dict = {
+            s.subject_code: s.subject_type 
+            for s in db.session.query(Subject.subject_code, Subject.subject_type)
+                .filter(Subject.subject_code.in_(subject_codes))
+                .all()
+        }
 
+        # Fetch all relevant faculty assignment IDs in one query
+        faculty_ids = df['FacultyId'].unique().tolist()
+        sections = df['Section'].unique().tolist()
+        
+        assignments_query = db.session.query(
+            FacultyAssignment.id,
+            FacultyAssignment.faculty_id,
+            FacultyAssignment.subject_code,
+            FacultyAssignment.section
+        ).filter(
+            FacultyAssignment.department == department,
+            FacultyAssignment.year == year,
+            FacultyAssignment.faculty_id.in_(faculty_ids),
+            FacultyAssignment.section.in_(sections),
+            FacultyAssignment.subject_code.in_(subject_codes)
+        ).all()
+        
+        # Create a lookup dictionary for fast assignment_id retrieval
+        assignment_lookup = {}
+        for assignment in assignments_query:
+            key = (assignment.faculty_id, assignment.subject_code, assignment.section)
+            assignment_lookup[key] = assignment.id
+
+        # Prepare bulk insert list
+        schedules_to_add = []
+        
+        for _, row in df.iterrows():
             day_of_week = row['Day']
             section = row['Section']
             period = row['Period']
@@ -511,8 +578,12 @@ def upload_default_schedules():
             faculty_id = row['FacultyId']
             venue = row['Venue']
 
-            subject_type = db.session.query(Subject.subject_type).filter(Subject.subject_code == subject_code).scalar()
+            # Get subject type from preloaded dictionary
+            subject_type = subject_types_dict.get(subject_code)
+            if not subject_type:
+                raise ValueError(f"Subject code {subject_code} not found")
 
+            # Calculate time based on subject type
             if subject_type.lower() == "lab":
                 start_time = PERIOD_TIMES[period][0]
                 end_period = period + LAB_DURATION - 1
@@ -522,24 +593,25 @@ def upload_default_schedules():
             else:
                 start_time, end_time = PERIOD_TIMES[period]
             
-            # the use of .scalar() method is to Return the first element of the first result or None if no rows present. If multiple rows are returned, raises
-            assignment_id = db.session.query(FacultyAssignment.id).filter(
-                        FacultyAssignment.department == department, 
-                        FacultyAssignment.subject_code == subject_code, 
-                        FacultyAssignment.section == section,
-                        FacultyAssignment.year == year, 
-                        FacultyAssignment.faculty_id == faculty_id).scalar()
+            # Get assignment_id from preloaded lookup
+            assignment_key = (faculty_id, subject_code, section)
+            assignment_id = assignment_lookup.get(assignment_key)
+            
+            if not assignment_id:
+                raise ValueError(f"No assignment found for faculty {faculty_id}, subject {subject_code}, section {section}")
 
-            defaultSchedule = DefaultSchedule(
-                day_of_week = day_of_week,
-                start_time = start_time,
-                end_time = end_time,
-                assignment_id = assignment_id,
-                venue = venue
-            )
+            schedules_to_add.append(DefaultSchedule(
+                day_of_week=day_of_week,
+                start_time=start_time,
+                end_time=end_time,
+                assignment_id=assignment_id,
+                venue=venue
+            ))
 
-            db.session.add(defaultSchedule)
-
+        # Bulk insert all schedules
+        if schedules_to_add:
+            db.session.bulk_save_objects(schedules_to_add)
+        
         db.session.commit()
         return jsonify({'message': 'Default schedules uploaded successfully'}), 201
     except Exception as e:
