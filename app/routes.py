@@ -360,21 +360,25 @@ def remove_faculty_assignment(assignment_id):
     # If the assignment doesn't exist, return a 404 Not Found error
     if not assignment_to_remove:
         return jsonify({'success': False, 'message': 'Faculty assignment not found.'}), 404
-        # Check if the faculty has any other assignments
 
     try:
-        # Delete the record from the database session
-        db.session.delete(assignment_to_remove)
-       
-
         faculty_id = assignment_to_remove.faculty_id
-        other_assignments = FacultyAssignment.query.filter(FacultyAssignment.faculty_id == faculty_id, FacultyAssignment.id != assignment_id).all()
+        
+        # Delete the assignment
+        db.session.delete(assignment_to_remove)
+        
+        # ✅ OPTIMIZED: Use exists() instead of fetching all assignments
+        # Check if faculty has any other assignments (more efficient than .all())
+        has_other_assignments = db.session.query(
+            db.session.query(FacultyAssignment).filter(
+                FacultyAssignment.faculty_id == faculty_id,
+                FacultyAssignment.id != assignment_id
+            ).exists()
+        ).scalar()
 
         # If no other assignments exist, delete the faculty from the Faculty table
-        if not other_assignments:
-            faculty_to_remove = Faculty.query.get(faculty_id)
-            if faculty_to_remove:
-                db.session.delete(faculty_to_remove)
+        if not has_other_assignments:
+            Faculty.query.filter_by(id=faculty_id).delete(synchronize_session=False)
 
         # Commit the change to the database
         db.session.commit()
@@ -460,7 +464,7 @@ def upload_subjects():
     try:
         if isreplace == 'true':
             try:
-                Subject.query.filter_by().delete(synchronize_session=False)
+                Subject.query.delete(synchronize_session=False)
                 db.session.commit()
             except Exception as e:
                 db.session.rollback()
@@ -469,24 +473,26 @@ def upload_subjects():
         # Read Excel into a DataFrame
         df = pd.read_excel(file)
 
-        # Expected columns: id, name, email, year, department, section
-
-        for index, row in df.iterrows():
-            subject = Subject(
+        # Prepare bulk insert list
+        subjects_to_add = []
+        for _, row in df.iterrows():
+            subjects_to_add.append(Subject(
                 subject_code=row['code'],
                 subject_mnemonic=row['mnemonic'],
                 subject_name=row['name'],
                 subject_type=row['type']
-            )
-            db.session.add(subject)
+            ))
         
+        # Bulk insert all subjects
+        if subjects_to_add:
+            db.session.bulk_save_objects(subjects_to_add)
 
         db.session.commit()
         return jsonify({'message': f'{len(df)} subjects added successfully.'})
 
     except Exception as e:
         db.session.rollback()
-        return jsonify({'message': "Subjects are already int the table."}), 500
+        return jsonify({'message': "Subjects are already in the table."}), 500
 
 
 @routes.route('/defacultschedules/upload', methods=['POST'])
@@ -726,15 +732,18 @@ def get_available_slots(faculty_id):
 
         available_slots = []
 
-        # Get all schedules for this group on the given date
-        existing_schedules = db.session.query(Schedule)\
-            .join(FacultyAssignment, Schedule.assignment_id == FacultyAssignment.id)\
-            .filter(
-                FacultyAssignment.year == year,
-                FacultyAssignment.department == department,
-                FacultyAssignment.section == section,
-                Schedule.date == target_date
-            ).all()
+        # ✅ OPTIMIZED: Fetch only start_time and end_time, not entire objects
+        existing_schedules = db.session.query(
+            Schedule.start_time,
+            Schedule.end_time
+        ).join(FacultyAssignment, Schedule.assignment_id == FacultyAssignment.id)\
+        .filter(
+            FacultyAssignment.year == year,
+            FacultyAssignment.department == department,
+            FacultyAssignment.section == section,
+            Schedule.date == target_date
+        ).all()
+        
         if subject_type == "lab":
             # Lab: 3-hour slots (consecutive periods)
             for i in range(len(all_slots) - 2):
@@ -744,9 +753,9 @@ def get_available_slots(faculty_id):
                 if slot_start < '12:30' < slot_end:
                     continue
                 conflict = False
-                for existing in existing_schedules:
+                for existing_start, existing_end in existing_schedules:
                     # Check if time slots overlap
-                    if not (slot_end <= existing.start_time or slot_start >= existing.end_time):
+                    if not (slot_end <= existing_start or slot_start >= existing_end):
                         conflict = True
                         break
                 if not conflict:
@@ -758,8 +767,8 @@ def get_available_slots(faculty_id):
             # Normal: 1-hour slots
             for slot_start, slot_end in all_slots:
                 conflict = False
-                for existing in existing_schedules:
-                    if not (slot_end <= existing.start_time or slot_start >= existing.end_time):
+                for existing_start, existing_end in existing_schedules:
+                    if not (slot_end <= existing_start or slot_start >= existing_end):
                         conflict = True
                         break
                 if not conflict:
@@ -807,11 +816,6 @@ def create_schedule():
         ).first()
         
         if not assignment:
-            # Debug: Check what assignments actually exist for this faculty
-            faculty_assignments = FacultyAssignment.query.filter_by(
-                faculty_id=data['faculty_id']
-            ).all()
-            
             return jsonify({
                 'success': False, 
                 'error': f'No faculty assignment found for {batch_display} {data["department"]} - {data["section"]}. Faculty may not be assigned to this class.'
@@ -819,23 +823,29 @@ def create_schedule():
         
         target_date = datetime.strptime(data['date'], '%Y-%m-%d').date()
         
-        # Enhanced conflict checking
-        existing_conflicts = Schedule.query\
+        # ✅ OPTIMIZED: Single query to check for conflicts (combines both faculty and time conflicts)
+        conflict = db.session.query(Schedule.id)\
             .join(FacultyAssignment)\
             .filter(
                 Schedule.date == target_date,
-                FacultyAssignment.faculty_id == data['faculty_id']
+                FacultyAssignment.faculty_id == data['faculty_id'],
+                Schedule.start_time < data['end_time'],
+                Schedule.end_time > data['start_time']
             )\
-            .all()
+            .first()
         
-        # Check each existing schedule for time overlap
-        for existing in existing_conflicts:
-            if (data['start_time'] < existing.end_time and 
-                data['end_time'] > existing.start_time):
-                return jsonify({
-                    'success': False, 
-                    'error': f'Time conflict with {existing.start_time}-{existing.end_time} at {existing.venue}'
-                }), 400
+        if conflict:
+            # Get conflict details for error message
+            conflict_schedule = db.session.query(
+                Schedule.start_time, 
+                Schedule.end_time, 
+                Schedule.venue
+            ).filter(Schedule.id == conflict[0]).first()
+            
+            return jsonify({
+                'success': False, 
+                'error': f'Time conflict with {conflict_schedule.start_time}-{conflict_schedule.end_time} at {conflict_schedule.venue}'
+            }), 400
         
         # Create new schedule
         new_schedule = Schedule(
@@ -1408,43 +1418,46 @@ def move_tomorrow_schedules_auto(app):
     """
     with app.app_context():
         try:
-            
             # Use TOMORROW's date instead of today
-            target_date = date.today()  + timedelta(days=1)
+            target_date = date.today() + timedelta(days=1)
             day_name = target_date.strftime('%a').upper()
             
-            # Get all default schedules for that day
+            # ✅ OPTIMIZED: Get all default schedules for that day
             default_schedules = DefaultSchedule.query\
                 .filter_by(day_of_week=day_name)\
                 .all()
             
-            created_count = 0
-            skipped_count = 0
+            if not default_schedules:
+                return
             
+            # ✅ OPTIMIZED: Get all existing schedule assignment_ids for target date in one query
+            existing_assignment_ids = set(
+                db.session.query(Schedule.assignment_id)
+                .filter(Schedule.date == target_date)
+                .all()
+            )
+            existing_assignment_ids = {aid[0] for aid in existing_assignment_ids}
+            
+            # ✅ OPTIMIZED: Prepare bulk insert (only for non-existing schedules)
+            schedules_to_add = []
             for default_schedule in default_schedules:
-                # Check if schedule already exists for target date
-                existing_schedule = Schedule.query.filter_by(
-                    assignment_id=default_schedule.assignment_id,
-                    date=target_date
-                ).first()
-                
-                if existing_schedule:
-                    skipped_count += 1
+                # Skip if already exists
+                if default_schedule.assignment_id in existing_assignment_ids:
                     continue
-                    
-                # Create new schedule entry
-                new_schedule = Schedule(
-                    assignment_id=default_schedule.assignment_id,
-                    date=target_date,
-                    start_time=default_schedule.start_time,
-                    end_time=default_schedule.end_time,
-                    venue=default_schedule.venue,
-                    status=False
-                )
-                db.session.add(new_schedule)
-                created_count += 1
+                
+                schedules_to_add.append({
+                    'assignment_id': default_schedule.assignment_id,
+                    'date': target_date,
+                    'start_time': default_schedule.start_time,
+                    'end_time': default_schedule.end_time,
+                    'venue': default_schedule.venue,
+                    'status': False
+                })
             
-            db.session.commit()
+            # ✅ OPTIMIZED: Bulk insert all schedules at once
+            if schedules_to_add:
+                db.session.bulk_insert_mappings(Schedule, schedules_to_add)
+                db.session.commit()
             
         except Exception as e:
             db.session.rollback()
@@ -1801,8 +1814,11 @@ def schedule_class():
         if not cr_record:
             return jsonify({'error': 'Only CR can schedule classes'}), 403
 
-        # Find faculty assignment for this subject and class
-        assignment = FacultyAssignment.query.filter_by(
+        # ✅ OPTIMIZED: Load assignment with eager loading of subject and faculty
+        assignment = FacultyAssignment.query.options(
+            joinedload(FacultyAssignment.subject),
+            joinedload(FacultyAssignment.faculty)
+        ).filter_by(
             subject_code=data['subject_code'],
             year=student.year,
             department=student.department,
@@ -1815,48 +1831,16 @@ def schedule_class():
         # Parse date
         class_date = datetime.strptime(data['date'], '%Y-%m-%d').date()
 
-        # Check 2: If any class already exists for this class (year, dept, section) at the same time and date
-        # This is the main free time check
-        class_conflict = db.session.query(Schedule)\
-            .join(FacultyAssignment)\
-            .filter(
-                FacultyAssignment.year == student.year,
-                FacultyAssignment.department == student.department,
-                FacultyAssignment.section == student.section,
-                Schedule.date == class_date,
-                # Check for time overlap: new class overlaps with existing class
-                Schedule.start_time < data['end_time'],
-                Schedule.end_time > data['start_time']
-            )\
-            .first()
+        # Pre-validation checks (fast, no DB queries needed)
+        # Check 1: Validate date is not in the past
+        if class_date < date.today():
+            return jsonify({'error': 'Cannot schedule classes in the past'}), 400
 
-        if class_conflict:
-            conflict_subject = class_conflict.assignment.subject.subject_name
-            conflict_faculty = class_conflict.assignment.faculty.name
-            return jsonify({
-                'error': f'Time conflict: {conflict_subject} ({conflict_faculty}) is already scheduled for {class_conflict.start_time}-{class_conflict.end_time}'
-            }), 400
+        # Check 2: Validate that the time slot doesn't cross lunch break
+        if data['start_time'] < '12:30' and data['end_time'] > '13:40':
+            return jsonify({'error': 'Class cannot span across lunch break (12:30-13:40)'}), 400
 
-        # Check 3: If faculty has another class at the same time
-        faculty_conflict = db.session.query(Schedule)\
-            .join(FacultyAssignment)\
-            .filter(
-                FacultyAssignment.faculty_id == assignment.faculty_id,
-                Schedule.date == class_date,
-                # Check for time overlap
-                Schedule.start_time < data['end_time'],
-                Schedule.end_time > data['start_time']
-            )\
-            .first()
-
-        if faculty_conflict:
-            conflict_class = f"E{faculty_conflict.assignment.year} {faculty_conflict.assignment.department}-{faculty_conflict.assignment.section}"
-            conflict_subject = faculty_conflict.assignment.subject.subject_name
-            return jsonify({
-                'error': f'Faculty conflict: {assignment.faculty.name} is already teaching {conflict_subject} for {conflict_class} at {faculty_conflict.start_time}-{faculty_conflict.end_time}'
-            }), 400
-
-        # Check 4: Validate time slot (should be one of the predefined slots)
+        # Check 3: Validate time slot (should be one of the predefined slots)
         valid_time_slots = [
             ('08:30', '09:30'), ('09:30', '10:30'), ('10:30', '11:30'), ('11:30', '12:30'),
             ('13:40', '14:40'), ('14:40', '15:40'), ('15:40', '16:40'),
@@ -1871,30 +1855,68 @@ def schedule_class():
         if not time_valid:
             return jsonify({'error': 'Invalid time slot selected'}), 400
 
-        # Check 5: Validate date is not in the past
-        if class_date < date.today():
-            return jsonify({'error': 'Cannot schedule classes in the past'}), 400
-
-        # Check 6: Validate that the time slot doesn't cross lunch break (12:30-13:40)
-        if data['start_time'] < '12:30' and data['end_time'] > '13:40':
-            return jsonify({'error': 'Class cannot span across lunch break (12:30-13:40)'}), 400
-
-        # Check 7: Validate lab duration (must be exactly 3 hours for lab subjects)
-        subject = Subject.query.get(data['subject_code'])
-        if subject and subject.subject_type.lower() == 'lab':
-            start_dt = datetime.strptime(data['start_time'], '%H:%M')
-            end_dt = datetime.strptime(data['end_time'], '%H:%M')
-            duration = (end_dt - start_dt).total_seconds() / 3600  # Convert to hours
+        # Check 4: Validate duration based on subject type
+        subject = assignment.subject  # Already loaded via joinedload
+        start_dt = datetime.strptime(data['start_time'], '%H:%M')
+        end_dt = datetime.strptime(data['end_time'], '%H:%M')
+        duration = (end_dt - start_dt).total_seconds() / 3600  # Convert to hours
+        
+        if subject.subject_type.lower() == 'lab':
             if duration != 3:
                 return jsonify({'error': 'Lab classes must be exactly 3 hours long'}), 400
-
-        # Check 8: Validate regular class duration (must be exactly 1 hour for non-lab subjects)
-        if subject and subject.subject_type.lower() != 'lab':
-            start_dt = datetime.strptime(data['start_time'], '%H:%M')
-            end_dt = datetime.strptime(data['end_time'], '%H:%M')
-            duration = (end_dt - start_dt).total_seconds() / 3600
+        else:
             if duration != 1:
                 return jsonify({'error': 'Regular classes must be exactly 1 hour long'}), 400
+
+        # ✅ OPTIMIZED: Combined conflict checking with single query
+        # Check both class time conflict AND faculty conflict in one query
+        conflicts = db.session.query(
+            Schedule.id,
+            Schedule.start_time,
+            Schedule.end_time,
+            FacultyAssignment.year,
+            FacultyAssignment.department,
+            FacultyAssignment.section,
+            FacultyAssignment.faculty_id,
+            Subject.subject_name,
+            Faculty.name.label('faculty_name')
+        ).join(FacultyAssignment, Schedule.assignment_id == FacultyAssignment.id)\
+        .join(Subject, FacultyAssignment.subject_code == Subject.subject_code)\
+        .join(Faculty, FacultyAssignment.faculty_id == Faculty.id)\
+        .filter(
+            Schedule.date == class_date,
+            Schedule.start_time < data['end_time'],
+            Schedule.end_time > data['start_time'],
+            db.or_(
+                # Class conflict: same year, dept, section
+                db.and_(
+                    FacultyAssignment.year == student.year,
+                    FacultyAssignment.department == student.department,
+                    FacultyAssignment.section == student.section
+                ),
+                # Faculty conflict: same faculty
+                FacultyAssignment.faculty_id == assignment.faculty_id
+            )
+        ).first()
+
+        if conflicts:
+            # Determine type of conflict
+            is_class_conflict = (
+                conflicts.year == student.year and
+                conflicts.department == student.department and
+                conflicts.section == student.section
+            )
+            
+            if is_class_conflict:
+                return jsonify({
+                    'error': f'Time conflict: {conflicts.subject_name} ({conflicts.faculty_name}) is already scheduled for {conflicts.start_time}-{conflicts.end_time}'
+                }), 400
+            else:
+                # Faculty conflict
+                conflict_class = f"E{conflicts.year} {conflicts.department}-{conflicts.section}"
+                return jsonify({
+                    'error': f'Faculty conflict: {assignment.faculty.name} is already teaching {conflicts.subject_name} for {conflict_class} at {conflicts.start_time}-{conflicts.end_time}'
+                }), 400
 
         # Create new schedule
         new_schedule = Schedule(
@@ -1915,11 +1937,11 @@ def schedule_class():
             'schedule_id': new_schedule.id,
             'schedule': {
                 'id': new_schedule.id,
-                'subject': assignment.subject.subject_name,
+                'subject': subject.subject_name,  # From eager loaded data
                 'date': class_date.isoformat(),
                 'time': f"{data['start_time']} - {data['end_time']}",
                 'venue': data['venue'],
-                'faculty': assignment.faculty.name
+                'faculty': assignment.faculty.name  # From eager loaded data
             }
         })
 
@@ -2299,27 +2321,32 @@ def cleanup_expired_schedules():
         app = create_app()
         
         with app.app_context():
-            current_time = datetime.now()
+            current_datetime = datetime.now()
+            current_date = current_datetime.date()
+            current_time = current_datetime.time()
             
-            # Get all schedules with status=False and no OTP
-            potential_schedules = Schedule.query.filter(
+            # ✅ OPTIMIZED: Use a single DELETE query instead of loading all schedules
+            # Calculate time 30 minutes ago
+            time_threshold = (current_datetime - timedelta(minutes=30)).time()
+            
+            # Delete schedules where:
+            # 1. Date is before today (already expired)
+            # 2. OR date is today AND end_time + 30min is before current time
+            # 3. AND status is False (not completed)
+            # 4. AND OTP is empty or null (not active)
+            deleted_count = db.session.query(Schedule).filter(
                 Schedule.status == False,
-                db.or_(Schedule.otp == "", Schedule.otp.is_(None))
-            ).all()
-            
-            deleted_count = 0
-            for schedule in potential_schedules:
-                # Calculate when this schedule expires (end_time + 30 minutes)
-                schedule_end_datetime = datetime.combine(
-                    schedule.date, 
-                    datetime.strptime(schedule.end_time, '%H:%M').time()
+                db.or_(Schedule.otp == "", Schedule.otp.is_(None)),
+                db.or_(
+                    # Past dates
+                    Schedule.date < current_date,
+                    # Today but time has passed (end_time < current_time - 30min)
+                    db.and_(
+                        Schedule.date == current_date,
+                        Schedule.end_time < time_threshold.strftime('%H:%M')
+                    )
                 )
-                schedule_expiry_time = schedule_end_datetime + timedelta(minutes=30)
-                
-                # Check if expired (current time > end_time + 30 minutes)
-                if current_time > schedule_expiry_time:
-                    db.session.delete(schedule)
-                    deleted_count += 1
+            ).delete(synchronize_session='fetch')
             
             db.session.commit()
             
