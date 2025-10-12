@@ -57,7 +57,7 @@ class Schedule(db.Model):
 class AttendanceRecord(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     student_id = db.Column(db.String(20), db.ForeignKey('student.id'), nullable=False, index=True)
-    session_id = db.Column(db.Integer, db.ForeignKey('schedule.id'), nullable=False, index=True)
+    session_id = db.Column(db.Integer, db.ForeignKey('schedule.id', ondelete='CASCADE'), nullable=False, index=True)
     status = db.Column(db.Boolean, nullable=False)
 
     student = db.relationship('Student', backref='attendance_record')
