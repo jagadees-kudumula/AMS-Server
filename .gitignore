@@ -42,6 +42,3 @@ firebase-credentials.json
 *-firebase-adminsdk-*.json
 firebase-*.json
 !google-services.json
-
-#Ignore .md files
-*.md
