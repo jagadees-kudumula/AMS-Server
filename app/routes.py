@@ -1380,7 +1380,7 @@ def get_attendance_report(assignment_id):
             'message': 'Internal server error'
         }), 500
 
-#Automation of Moving Schedules Daily at 17:58
+#Automation of Moving Schedules Daily at 00:58
 scheduler = None
 
 def start_daily_scheduler(app):
@@ -1390,13 +1390,13 @@ def start_daily_scheduler(app):
     # Create scheduler
     scheduler = BackgroundScheduler(daemon=True)
     
-    # Add the job to run daily at 17:58
+    # Add the job to run daily at 00:58
     scheduler.add_job(
         func=move_tomorrow_schedules_auto,
         args=[app],
-        trigger=CronTrigger(hour=17, minute=58),
+        trigger=CronTrigger(hour=00, minute=58),
         id='daily_schedule_move',
-        name='Move tomorrow schedules daily at 5:58 PM'
+        name='Move tomorrow schedules daily at 12:58 AM'
     )
 
     start_cleanup_scheduler(app)
