@@ -1,3 +1,4 @@
+import os
 from flask import Flask, request, jsonify, Blueprint,current_app
 from app import db
 from app.models import CR, Student, Faculty, FacultyAssignment, Subject, DefaultSchedule, Schedule, AttendanceRecord, FCMToken, NotificationLog
@@ -1384,9 +1385,12 @@ def get_attendance_report(assignment_id):
 scheduler = None
 
 def start_daily_scheduler(app):
+
+    if os.environ.get('WERKZEUG_RUN_MAIN') != 'true':
+        return None
     
     global scheduler
-    
+
     # Create scheduler
     scheduler = BackgroundScheduler(daemon=True)
     
@@ -1394,7 +1398,7 @@ def start_daily_scheduler(app):
     scheduler.add_job(
         func=move_tomorrow_schedules_auto,
         args=[app],
-        trigger=CronTrigger(hour=00, minute=58),
+        trigger=CronTrigger(hour=0, minute=58),
         id='daily_schedule_move',
         name='Move tomorrow schedules daily at 12:58 AM'
     )
