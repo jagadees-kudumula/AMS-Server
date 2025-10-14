@@ -1587,6 +1587,8 @@ def remove_otp_job(schedule_id):
         
         # Create app instance and context
         app = create_app()
+
+        print("Removing OTP for schedule:", schedule_id)
         
         with app.app_context():
             schedule = Schedule.query.get(schedule_id)
@@ -1604,6 +1606,7 @@ def get_student_schedule():
     try:
         # Get student email from query parameters
         student_email = request.args.get('email')
+        date_str = request.args.get('date') 
         if not student_email:
             return jsonify({'error': 'Student email is required'}), 400
 
@@ -1612,7 +1615,7 @@ def get_student_schedule():
         if not student:
             return jsonify({'error': 'Student not found'}), 404
 
-        today = date.today()
+        today = datetime.strptime(date_str, '%Y-%m-%d').date()
         tomorrow = today + timedelta(days=1)
 
         # ✅ OPTIMIZED: Query for actual schedules with all needed data
