@@ -20,6 +20,36 @@ routes = Blueprint('main', __name__)
 batchToYear = {'E1':1,'E2':2,'E3':3,'E4':4}
 yearToBatch = {1:'E1', 2:'E2', 3:'E3', 4:'E4'}
 
+# ==================== TIMEZONE UTILITIES ====================
+# NEW: Added timezone utility functions for consistent IST handling
+UTC_TZ = timezone.utc
+IST_TZ = pytz.timezone('Asia/Kolkata')
+
+def get_ist_now():
+    """Get current datetime in IST timezone"""
+    return datetime.now(IST_TZ)
+
+def get_utc_now():
+    """Get current datetime in UTC timezone"""
+    return datetime.now(UTC_TZ)
+
+def get_ist_today():
+    """Get today's date in IST"""
+    return get_ist_now().date()
+
+def convert_utc_to_ist(utc_dt):
+    """Convert UTC datetime to IST"""
+    if utc_dt.tzinfo is None:
+        utc_dt = utc_dt.replace(tzinfo=UTC_TZ)
+    return utc_dt.astimezone(IST_TZ)
+
+def convert_ist_to_utc(ist_dt):
+    """Convert IST datetime to UTC"""
+    if ist_dt.tzinfo is None:
+        ist_dt = IST_TZ.localize(ist_dt)
+    return ist_dt.astimezone(UTC_TZ)
+# ==================== END TIMEZONE UTILITIES ====================
+
 @routes.route('/students/upload', methods=['POST'])
 def upload_students():
     if 'file' not in request.files:
@@ -1383,11 +1413,10 @@ def get_attendance_report(assignment_id):
             'message': 'Internal server error'
         }), 500
 
-#Automation of Moving Schedules Daily at 00:58
+# ==================== UPDATED: AUTOMATED SCHEDULE MOVING WITH IST TIMEZONE ====================
 scheduler = None
 
 def start_daily_scheduler(app):
-
     if os.environ.get('WERKZEUG_RUN_MAIN') != 'true':
         return None
     
@@ -1396,13 +1425,13 @@ def start_daily_scheduler(app):
     # Create scheduler
     scheduler = BackgroundScheduler(daemon=True)
     
-    # Add the job to run daily at 00:58
+    # UPDATED: Use IST timezone for the cron trigger
     scheduler.add_job(
         func=move_tomorrow_schedules_auto,
         args=[app],
-        trigger=CronTrigger(hour=0, minute=58),
+        trigger=CronTrigger(hour=0, minute=58, timezone=IST_TZ),  # CHANGED: Added IST timezone
         id='daily_schedule_move',
-        name='Move tomorrow schedules daily at 12:58 AM'
+        name='Move tomorrow schedules daily at 12:58 AM IST'
     )
 
     start_cleanup_scheduler(app)
@@ -1420,14 +1449,13 @@ def start_daily_scheduler(app):
 def move_tomorrow_schedules_auto(app):
     """
     Automated version that moves TOMORROW's schedules
-    This runs automatically every day at 17:58
+    This runs automatically every day at 00:58 IST
     """
     with app.app_context():
         try:
-            # Use Asia/Kolkata timezone for all schedule logic
-            india_tz = pytz.timezone('Asia/Kolkata')
-            now_india = datetime.now(india_tz)
-            target_date = (now_india + timedelta(days=1)).date()
+            # UPDATED: Use IST for all date calculations
+            now_ist = get_ist_now()  # CHANGED: Using IST timezone
+            target_date = (now_ist + timedelta(days=1)).date()
             day_name = target_date.strftime('%a').upper()
 
             # ✅ OPTIMIZED: Get all default schedules for that day
@@ -1469,19 +1497,24 @@ def move_tomorrow_schedules_auto(app):
         except Exception as e:
             db.session.rollback()
 
+# ==================== UPDATED: SERVER TIME ENDPOINT WITH IST ====================
 @routes.route('/time', methods=['GET'])
 def get_server_time():
     try:
-        now = datetime.now()
-        current_time = now.strftime('%H:%M:%S')
-        current_date = now.strftime('%Y-%m-%d')
-        # Optionally, include timezone info if needed
+        # UPDATED: Show both UTC and IST times
+        now_utc = get_utc_now()
+        now_ist = get_ist_now()
+        
         return jsonify({
             'success': True,
-            'datetime': f"{current_date}T{current_time}",
-            'date': current_date,
-            'time': current_time,
-            'timezone': 'Asia/Kolkata'
+            'utc_datetime': now_utc.isoformat(),  # NEW: UTC time
+            'ist_datetime': now_ist.isoformat(),  # NEW: IST time
+            'utc_date': now_utc.strftime('%Y-%m-%d'),  # NEW: UTC date
+            'ist_date': now_ist.strftime('%Y-%m-%d'),  # NEW: IST date
+            'utc_time': now_utc.strftime('%H:%M:%S'),  # NEW: UTC time
+            'ist_time': now_ist.strftime('%H:%M:%S'),  # NEW: IST time
+            'server_timezone': 'UTC',
+            'display_timezone': 'Asia/Kolkata (IST)'  # NEW: Timezone info
         }), 200
     except Exception as e:
         return jsonify({'success': False, 'error': 'Failed to fetch server time'}), 500
@@ -1556,9 +1589,8 @@ def generate_otp():
         
         db.session.commit()
         
-        # ⏰ CRITICAL: Set OTP timestamp AFTER all database operations are complete
-        # This ensures the 45-second countdown starts from when data is ready, not when OTP generation started
-        schedule.otp_created_at = datetime.now(timezone.utc)
+        # ⏰ UPDATED: Set OTP timestamp in UTC for consistent countdown
+        schedule.otp_created_at = datetime.now(UTC_TZ)  # CHANGED: Using UTC for consistency
         db.session.commit()
         
     except Exception as e:
@@ -1622,7 +1654,14 @@ def get_student_schedule():
         if not student:
             return jsonify({'error': 'Student not found'}), 404
 
-        today = datetime.strptime(date_str, '%Y-%m-%d').date()
+        # UPDATED: Use IST for date calculations
+        if date_str:
+            # If date provided, use it (assuming it's in IST context)
+            today = datetime.strptime(date_str, '%Y-%m-%d').date()
+        else:
+            # Default to today in IST
+            today = get_ist_today()  # CHANGED: Using IST today
+            
         tomorrow = today + timedelta(days=1)
 
         # ✅ OPTIMIZED: Query for actual schedules with all needed data
@@ -1843,7 +1882,8 @@ def schedule_class():
 
         # Pre-validation checks (fast, no DB queries needed)
         # Check 1: Validate date is not in the past
-        if class_date < date.today():
+        # UPDATED: Use IST for date comparison
+        if class_date < get_ist_today():  # CHANGED: Using IST today
             return jsonify({'error': 'Cannot schedule classes in the past'}), 400
 
         # Check 2: Validate that the time slot doesn't cross lunch break
@@ -2221,7 +2261,7 @@ def get_student_history(student_id):
         if not date_str:
             return jsonify({'success': False, 'error': 'Date parameter is required'}), 400
         
-        # Parse the date
+        # Parse the date - assume it's referring to IST date
         try:
             target_date = datetime.strptime(date_str, '%Y-%m-%d').date()
         except ValueError:
@@ -2298,9 +2338,8 @@ def get_student_history(student_id):
     except Exception as e:
         return jsonify({'success': False, 'error': 'Failed to fetch student history'}), 500
 
-#To clean the schedules automatically for every 100 days at 5:00PM
+# ==================== UPDATED: CLEANUP FUNCTIONS WITH IST TIMEZONE ====================
 def cleanup_old_schedules(app):
-    
     with app.app_context():
         try:            
             cutoff_date = date.today() - timedelta(days=100)
@@ -2312,48 +2351,39 @@ def cleanup_old_schedules(app):
         except Exception as e:
             db.session.rollback()
 
-# Helper function to convert 24hr to 12hr format
-def format_time_12hr(time_str):
-    """Convert '08:30' to '08:30 AM' or '14:30' to '02:30 PM'"""
-    try:
-        time_obj = datetime.strptime(time_str, '%H:%M')
-        return time_obj.strftime('%I:%M %p')
-    except:
-        return time_str
-
+# UPDATED: Cleanup function using IST timezone
 def cleanup_expired_schedules():
-    """Automatically delete schedules that have expired (end_time + 30 minutes)"""
+    """Automatically delete schedules that have expired (end_time + 30 minutes) using IST"""
     try:
         from app import create_app, db
         from app.models import Schedule
-        from datetime import datetime, timedelta
         
         app = create_app()
         
         with app.app_context():
-            current_datetime = datetime.now()
-            current_date = current_datetime.date()
-            current_time = current_datetime.time()
+            # UPDATED: Use IST for all time calculations
+            current_ist = get_ist_now()  # CHANGED: Using IST timezone
+            current_date_ist = current_ist.date()
+            current_time_ist = current_ist.time()
             
-            # ✅ OPTIMIZED: Use a single DELETE query instead of loading all schedules
-            # Calculate time 30 minutes ago
-            time_threshold = (current_datetime - timedelta(minutes=30)).time()
+            # Calculate time 30 minutes ago in IST
+            time_threshold_ist = (current_ist - timedelta(minutes=30)).time()
             
             # Delete schedules where:
-            # 1. Date is before today (already expired)
-            # 2. OR date is today AND end_time + 30min is before current time
+            # 1. Date is before today in IST (already expired)
+            # 2. OR date is today in IST AND end_time + 30min is before current IST time
             # 3. AND status is False (not completed)
             # 4. AND OTP is empty or null (not active)
             deleted_count = db.session.query(Schedule).filter(
                 Schedule.status == False,
                 db.or_(Schedule.otp == "", Schedule.otp.is_(None)),
                 db.or_(
-                    # Past dates
-                    Schedule.date < current_date,
-                    # Today but time has passed (end_time < current_time - 30min)
+                    # Past dates in IST
+                    Schedule.date < current_date_ist,
+                    # Today in IST but time has passed (end_time < current_ist_time - 30min)
                     db.and_(
-                        Schedule.date == current_date,
-                        Schedule.end_time < time_threshold.strftime('%H:%M')
+                        Schedule.date == current_date_ist,
+                        Schedule.end_time < time_threshold_ist.strftime('%H:%M')
                     )
                 )
             ).delete(synchronize_session='fetch')
@@ -2376,6 +2406,15 @@ def start_cleanup_scheduler(app):
         id='cleanup_expired_schedules',
         name='Clean up expired schedules every 5 minutes'
     )
+
+# Helper function to convert 24hr to 12hr format
+def format_time_12hr(time_str):
+    """Convert '08:30' to '08:30 AM' or '14:30' to '02:30 PM'"""
+    try:
+        time_obj = datetime.strptime(time_str, '%H:%M')
+        return time_obj.strftime('%I:%M %p')
+    except:
+        return time_str
 
 
 

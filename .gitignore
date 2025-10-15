@@ -42,3 +42,6 @@ firebase-credentials.json
 *-firebase-adminsdk-*.json
 firebase-*.json
 !google-services.json
+
+#Ignore .bak files
+*.bak
