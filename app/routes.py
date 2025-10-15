@@ -5,7 +5,9 @@ from app.models import CR, Student, Faculty, FacultyAssignment, Subject, Default
 import pandas as pd
 import io
 import json
+
 from datetime import datetime, date, timedelta, timezone
+import pytz
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 import atexit
@@ -1422,18 +1424,19 @@ def move_tomorrow_schedules_auto(app):
     """
     with app.app_context():
         try:
-            # Use TOMORROW's date instead of today
-            target_date = date.today() + timedelta(days=1)
+            # Use Asia/Kolkata timezone for all schedule logic
+            india_tz = pytz.timezone('Asia/Kolkata')
+            now_india = datetime.now(india_tz)
+            target_date = (now_india + timedelta(days=1)).date()
             day_name = target_date.strftime('%a').upper()
-            
+
             # ✅ OPTIMIZED: Get all default schedules for that day
-            default_schedules = DefaultSchedule.query\
-                .filter_by(day_of_week=day_name)\
-                .all()
-            
+            default_schedules = DefaultSchedule.query.\
+                filter_by(day_of_week=day_name).all()
+
             if not default_schedules:
                 return
-            
+
             # ✅ OPTIMIZED: Get all existing schedule assignment_ids for target date in one query
             existing_assignment_ids = set(
                 db.session.query(Schedule.assignment_id)
@@ -1441,14 +1444,14 @@ def move_tomorrow_schedules_auto(app):
                 .all()
             )
             existing_assignment_ids = {aid[0] for aid in existing_assignment_ids}
-            
+
             # ✅ OPTIMIZED: Prepare bulk insert (only for non-existing schedules)
             schedules_to_add = []
             for default_schedule in default_schedules:
                 # Skip if already exists
                 if default_schedule.assignment_id in existing_assignment_ids:
                     continue
-                
+
                 schedules_to_add.append({
                     'assignment_id': default_schedule.assignment_id,
                     'date': target_date,
@@ -1457,12 +1460,12 @@ def move_tomorrow_schedules_auto(app):
                     'venue': default_schedule.venue,
                     'status': False
                 })
-            
+
             # ✅ OPTIMIZED: Bulk insert all schedules at once
             if schedules_to_add:
                 db.session.bulk_insert_mappings(Schedule, schedules_to_add)
                 db.session.commit()
-            
+
         except Exception as e:
             db.session.rollback()
 
