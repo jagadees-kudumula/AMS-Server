@@ -2365,7 +2365,7 @@ def cleanup_expired_schedules():
             current_ist = get_ist_now()  # CHANGED: Using IST timezone
 
             # Skipping cleanup between 00:00-00:45 IST to avoid midnight boundary issues
-            if current_ist.hour == 0 and current_ist.minute == 45:
+            if current_ist.hour == 0 and current_ist.minute <= 45:
                 return
 
             current_date_ist = current_ist.date()
