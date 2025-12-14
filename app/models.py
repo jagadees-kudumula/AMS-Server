@@ -4,6 +4,7 @@ class Student(db.Model):
     __tablename__ = 'student'
     
     id = db.Column(db.String(20), primary_key=True)
+    roll_number = db.Column(db.Integer)
     name = db.Column(db.String(100), nullable=False)
     email = db.Column(db.String(150), unique=True, nullable=False)
     year = db.Column(db.Integer, nullable=False, index=True)

@@ -85,6 +85,7 @@ def upload_students():
                 email=row['id'].lower() + "@rguktrkv.ac.in",
                 year=year,
                 department=department,
+                roll_number=row['roll_number'],
                 section=row['section']
             ))
         
@@ -2905,3 +2906,229 @@ def reset_device_binding(student_id):
             'success': False,
             'message': 'Server error'
         }), 500
+
+
+@routes.route('/attendance/<int:schedule_id>', methods=['GET'])
+def get_attendance(schedule_id):
+    """
+    Get existing attendance using roll_number (1, 2, 3...)
+    """
+    try:
+        schedule = Schedule.query.get(schedule_id)
+        if not schedule:
+            return jsonify({'success': False, 'error': 'Schedule not found'}), 404
+        
+        assignment = FacultyAssignment.query.get(schedule.assignment_id)
+        if not assignment:
+            return jsonify({'success': False, 'error': 'Class assignment not found'}), 404
+        
+        # Get students ordered by roll_number
+        class_students = Student.query.filter_by(
+            year=assignment.year,
+            department=assignment.department,
+            section=assignment.section
+        ).order_by(Student.roll_number).all()  # ✅ Order by roll_number
+        
+        attendance_records = AttendanceRecord.query.filter_by(
+            session_id=schedule_id
+        ).all()
+        
+        attendance_map = {record.student_id: record.status for record in attendance_records}
+        
+        attendance_data = []
+        for student in class_students:
+            status = attendance_map.get(student.id, False)
+            attendance_data.append({
+                'student_number': student.roll_number,  # ✅ Use actual roll_number
+                'status': 'present' if status else 'absent',
+                'student_id': student.id,
+                'student_name': student.name,
+                'roll_no': student.id
+            })
+        
+        return jsonify({
+            'success': True,
+            'topic': schedule.topic_discussed or '',
+            'attendance': attendance_data,
+            'total_students': len(class_students),
+            'class_info': {
+                'year': assignment.year,
+                'department': assignment.department,
+                'section': assignment.section,
+                'schedule_date': schedule.date.strftime('%Y-%m-%d'),
+                'start_time': schedule.start_time,
+                'end_time': schedule.end_time,
+                'status': schedule.status
+            }
+        }), 200
+        
+    except Exception as e:
+        return jsonify({'success': False, 'error': f'Failed to fetch attendance: {str(e)}'}), 500
+
+
+
+
+
+
+@routes.route('/submit-attendance', methods=['POST'])
+def submit_attendance():
+    """
+    Submit attendance using roll_number mapping
+    """
+    try:
+        data = request.get_json()
+        
+        if not data or 'schedule_id' not in data or 'faculty_id' not in data or 'topic' not in data or 'students' not in data:
+            return jsonify({
+                'success': False,
+                'error': 'Missing required fields: schedule_id, faculty_id, topic, students'
+            }), 400
+        
+        schedule_id = data['schedule_id']
+        faculty_id = data['faculty_id']
+        topic = data['topic'].strip()
+        students_data = data['students']
+        
+        if not topic:
+            return jsonify({'success': False, 'error': 'Topic cannot be empty'}), 400
+        
+        schedule = Schedule.query.get(schedule_id)
+        if not schedule:
+            return jsonify({'success': False, 'error': 'Schedule not found'}), 404
+        
+        assignment = FacultyAssignment.query.get(schedule.assignment_id)
+        if not assignment or assignment.faculty_id != faculty_id:
+            return jsonify({'success': False, 'error': 'Faculty not authorized'}), 403
+        
+        # Get students with their roll numbers
+        class_students = Student.query.filter_by(
+            year=assignment.year,
+            department=assignment.department,
+            section=assignment.section
+        ).order_by(Student.roll_number).all()  # ✅ Order by roll_number
+        
+        # Create mapping of roll_number -> student object
+        student_by_roll = {student.roll_number: student for student in class_students}
+        
+        if not class_students:
+            return jsonify({'success': False, 'error': 'No students found for this class'}), 400
+        
+        # Update schedule
+        schedule.topic_discussed = topic
+        schedule.status = True
+        
+        # Clear existing attendance
+        AttendanceRecord.query.filter_by(session_id=schedule_id).delete()
+        
+        attendance_records_created = 0
+        for student_info in students_data:
+            student_number = student_info.get('student_number')  # This is roll_number
+            status = student_info.get('status')
+            
+            # Find student by roll_number
+            student = student_by_roll.get(student_number)
+            if not student:
+                continue  # Skip invalid roll numbers
+            
+            attendance_status = True if status == 'present' else False
+            
+            attendance_record = AttendanceRecord(
+                student_id=student.id,  # Use actual DB ID
+                session_id=schedule_id,
+                status=attendance_status
+            )
+            
+            db.session.add(attendance_record)
+            attendance_records_created += 1
+        
+        db.session.commit()
+        
+        present_count = sum(1 for s in students_data if s.get('status') == 'present')
+        absent_count = len(students_data) - present_count
+        
+        return jsonify({
+            'success': True,
+            'message': 'Attendance submitted successfully',
+            'attendance_id': schedule_id,
+            'summary': {
+                'total_students': len(class_students),
+                'present': present_count,
+                'absent': absent_count,
+                'percentage': round((present_count / len(class_students)) * 100, 2)
+            },
+            'topic': topic,
+            'attendance_records_created': attendance_records_created
+        }), 200
+        
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({'success': False, 'error': f'Failed to submit attendance: {str(e)}'}), 500
+
+
+
+
+
+
+@routes.route('/class/<string:year>/<string:department>/<string:section>/student-count', methods=['GET'])
+def get_class_student_count(year, department, section):
+    """
+    Get student count using roll_number
+    """
+    try:
+        if year in batchToYear:
+            year_num = batchToYear[year]
+        else:
+            try:
+                year_num = int(year)
+            except:
+                return jsonify({'success': False, 'error': 'Invalid year format'}), 400
+        
+        # Get actual count from database
+        count = Student.query.filter_by(
+            year=year_num,
+            department=department,
+            section=section
+        ).count()
+        
+        # Also get max roll number for validation
+        max_roll = db.session.query(db.func.max(Student.roll_number)).filter_by(
+            year=year_num,
+            department=department,
+            section=section
+        ).scalar()
+        
+        return jsonify({
+            'success': True,
+            'count': count,
+            'max_roll_number': max_roll or 0,
+            'year': year,
+            'department': department,
+            'section': section
+        }), 200
+        
+    except Exception as e:
+        return jsonify({'success': False, 'error': f'Failed to get student count: {str(e)}'}), 500
+
+
+@routes.route('/faculty/by-email', methods=['GET'])
+def get_faculty_by_email():
+    email = request.args.get('email')
+    
+    if not email:
+        return jsonify({'error': 'Email parameter is required'}), 400
+    
+    try:
+        faculty = Faculty.query.filter_by(email=email).first()
+        
+        if not faculty:
+            return jsonify({'error': 'Faculty not found'}), 404
+        
+        return jsonify({
+            'id': faculty.id,
+            'faculty_id': faculty.id,  # In case your frontend expects this
+            'name': faculty.name,
+            'email': faculty.email
+        }), 200
+    
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
